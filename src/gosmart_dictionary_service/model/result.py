@@ -15,4 +15,5 @@ class Result[T](BaseModel):
 
     status: int = Field(default=0, description="Result status code")
     message: str = Field(default="Please set a proper result", description="Human-readable status message")
+    value_type: str = Field(default="", description="Result payload type")
     value: Optional[T] = Field(default=None, description="Optional result payload")
