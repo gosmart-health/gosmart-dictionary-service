@@ -6,9 +6,16 @@ import json
 from datetime import datetime
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
-from gosmart_graphite.core.security import resolve_llm_api_key
-from gosmart_graphite.model.auditable import AuditableNode, AuditableRelation, generate_deterministic_id
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from gosmart_dictionary_service.core.config import Settings, get_settings
+from gosmart_dictionary_service.core.security import resolve_llm_api_key
+from gosmart_dictionary_service.model.auditable import AuditableNode, AuditableRelation, generate_deterministic_id
+
+DEFAULT_EMBEDDING_CONFIG_TAG = "embedding-v1"
+DEFAULT_INFERENCE_CONFIG_TAG = "inference-v1"
+VERTEX_AI_API_KEY_ENV_REF = "${GOSMART_DS_VERTEX_AI_API_KEY}"
+_CLOUD_GEMINI_PROVIDERS = frozenset({"vertexai", "googleai", "gemini"})
 
 
 def _parse_extra_config(v: Any) -> Optional[Dict[str, Any]]:
@@ -34,14 +41,17 @@ class LLM_Config(AuditableNode):
 
     tag: str = Field(
         ...,
-        description="Purpose tag/key unique within an associated Group (e.g. 'embedding-v1', 'router', 'rag')",
+        description="Purpose tag/key unique within an associated Group (e.g. 'embedding-v1', 'inference-v1')",
     )
     provider: str = Field(
         ...,
         description="LLM provider name normalized lowercase (e.g. 'ollama', 'vertexai', 'googleai')",
     )
-    model: str = Field(..., description="Canonical model name (e.g. 'nomic-embed-text:latest', 'gemini-embedding-001')")
-    url: str = Field(default="", description="Optional API base URL (e.g. 'http://10.200.0.103:11434')")
+    model: str = Field(
+        ...,
+        description="Canonical model name (e.g. 'embeddinggemma-2:270m', 'gemma4:e2b', 'gemini-embedding-001')",
+    )
+    url: str = Field(default="", description="Optional API base URL (e.g. 'http://m5.local.:11434')")
     dimensions: Optional[int] = Field(
         default=None,
         description="Native or requested output vector dimensionality (e.g. 768)",
@@ -200,6 +210,63 @@ class LLM_Config(AuditableNode):
 LLMConfigNode = LLM_Config
 
 
+def build_default_embedding_llm_config(
+    group_id: str,
+    *,
+    settings: Optional[Settings] = None,
+    test_id: Optional[str] = None,
+    acted_by: str = "system",
+) -> LLM_Config:
+    """Build the default group-scoped vector embedding ``LLM_Config`` from Settings."""
+    cfg = settings or get_settings()
+    provider = cfg.VECTOR_EMBED_PROVIDER.strip().lower()
+    tag = cfg.VECTOR_EMBED_TAG.strip() or DEFAULT_EMBEDDING_CONFIG_TAG
+    api_key = VERTEX_AI_API_KEY_ENV_REF if provider in _CLOUD_GEMINI_PROVIDERS and cfg.VERTEX_AI_API_KEY else ""
+    url = "" if provider in _CLOUD_GEMINI_PROVIDERS else cfg.VECTOR_EMBED_SERVER_URL
+    return LLM_Config(
+        id=LLM_Config.compute_group_scoped_id(tag=tag, group_id=group_id, test_id=test_id),
+        tag=tag,
+        provider=provider,
+        model=cfg.VECTOR_EMBED_MODEL,
+        url=url,
+        dimensions=cfg.VECTOR_EMBED_DIMENSIONS,
+        api_key=api_key,
+        location=cfg.VERTEX_AI_LOCATION,
+        project_id=cfg.VERTEX_AI_PROJECT_ID,
+        description=f"Default vector embedding configuration ({provider}/{cfg.VECTOR_EMBED_MODEL})",
+        test_id=test_id,
+        ActedBy=acted_by,
+    )
+
+
+def build_default_inference_llm_config(
+    group_id: str,
+    *,
+    settings: Optional[Settings] = None,
+    test_id: Optional[str] = None,
+    acted_by: str = "system",
+) -> LLM_Config:
+    """Build the default group-scoped inference ``LLM_Config`` from Settings."""
+    cfg = settings or get_settings()
+    provider = cfg.INFERENCE_PROVIDER.strip().lower()
+    tag = cfg.INFERENCE_TAG.strip() or DEFAULT_INFERENCE_CONFIG_TAG
+    api_key = VERTEX_AI_API_KEY_ENV_REF if provider in _CLOUD_GEMINI_PROVIDERS and cfg.VERTEX_AI_API_KEY else ""
+    url = "" if provider in _CLOUD_GEMINI_PROVIDERS else cfg.INFERENCE_SERVER_URL
+    return LLM_Config(
+        id=LLM_Config.compute_group_scoped_id(tag=tag, group_id=group_id, test_id=test_id),
+        tag=tag,
+        provider=provider,
+        model=cfg.INFERENCE_MODEL,
+        url=url,
+        api_key=api_key,
+        location=cfg.VERTEX_AI_LOCATION,
+        project_id=cfg.VERTEX_AI_PROJECT_ID,
+        description=f"Default inference LLM configuration ({provider}/{cfg.INFERENCE_MODEL})",
+        test_id=test_id,
+        ActedBy=acted_by,
+    )
+
+
 class HasLlmConfigRelation(AuditableRelation):
     """Relationship connecting sponsoring Group -> LLM_Config."""
 
@@ -211,7 +278,7 @@ class LLMConfigCreateRequest(BaseModel):
 
     tag: str = Field(
         ...,
-        description="Purpose tag unique within an associated Group (e.g. 'embedding-v1', 'router', 'rag')",
+        description="Purpose tag unique within an associated Group (e.g. 'embedding-v1', 'inference-v1')",
     )
     provider: str = Field(..., description="LLM provider ('ollama', 'vertexai', 'googleai', etc.)")
     model: str = Field(..., description="Canonical model name")
@@ -392,3 +459,20 @@ class LLMConfigResponse(BaseModel):
     updated_at: Optional[datetime] = Field(default=None, description="Updated timestamp (UTC)")
 
     model_config = {"populate_by_name": True}
+
+
+__all__ = [
+    "DEFAULT_EMBEDDING_CONFIG_TAG",
+    "DEFAULT_INFERENCE_CONFIG_TAG",
+    "VERTEX_AI_API_KEY_ENV_REF",
+    "LLM_Config",
+    "LLMConfigNode",
+    "HasLlmConfigRelation",
+    "build_default_embedding_llm_config",
+    "build_default_inference_llm_config",
+    "LLMConfigCreateRequest",
+    "LLMConfigUpdateRequest",
+    "LLMConfigAssignRequest",
+    "LLMConfigGroupSummary",
+    "LLMConfigResponse",
+]

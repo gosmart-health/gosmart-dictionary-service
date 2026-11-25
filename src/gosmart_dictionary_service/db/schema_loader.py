@@ -1,13 +1,14 @@
-"""Explicit manifest loader and line-accurate parser for Neo4j Cypher schema scripts."""
+"""Explicit manifest loader, parser, and executor for Neo4j Cypher schema scripts."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import LiteralString, Optional, Sequence, cast
 
 from gosmart_dictionary_service.core.logging import get_logger
+from gosmart_dictionary_service.db.neo4j import Neo4jClient, neo4j_client
 
 logger = get_logger("gosmart_ds.schema")
 
@@ -17,6 +18,7 @@ logger = get_logger("gosmart_ds.schema")
 SCHEMA_SCRIPT_FILES: tuple[str, ...] = (
     "system_schema.cypher",
     "embedding_schema.cypher",
+    "dicom_schema.cypher",
 )
 
 _DEFAULT_SCHEMA_DIR = Path(__file__).resolve().parent
@@ -336,3 +338,93 @@ def load_schema_statements(
         all_statements.extend(parsed)
 
     return all_statements
+
+
+async def apply_schema_async(
+    client: Optional[Neo4jClient] = None,
+    *,
+    script_files: Sequence[str] = SCHEMA_SCRIPT_FILES,
+    schema_dir: Optional[Path] = None,
+) -> int:
+    """Execute all allowlisted Neo4j DDL schema statements asynchronously.
+
+    Returns the total number of statements executed. Raises ``SchemaInitializationError``
+    with exact file and line coordinates on failure.
+    """
+    target_client = client or neo4j_client
+    statements = load_schema_statements(script_files=script_files, schema_dir=schema_dir)
+    for stmt in statements:
+        try:
+            await target_client.execute_query(stmt.statement)
+        except Exception as exc:
+            err_line, err_col = extract_error_location(stmt, exc)
+            msg = (
+                f"Failed executing schema statement #{stmt.statement_index} in '{stmt.source_file}' "
+                f"({stmt.line_range_label}): {exc}"
+            )
+            logger.error(
+                "schema_statement_execution_failed",
+                script_file=stmt.source_file,
+                statement_index=stmt.statement_index,
+                error_line=err_line,
+                error_column=err_col,
+                error=str(exc),
+            )
+            raise SchemaInitializationError(
+                msg,
+                script_file=stmt.source_file,
+                start_line=stmt.start_line,
+                end_line=stmt.end_line,
+                error_line=err_line,
+                error_column=err_col,
+                statement_index=stmt.statement_index,
+                statement=stmt.statement,
+                cause=exc,
+            ) from exc
+
+    logger.info("neo4j_schema_initialized", statement_count=len(statements), scripts=list(script_files))
+    return len(statements)
+
+
+def apply_schema_sync(
+    client: Optional[Neo4jClient] = None,
+    *,
+    script_files: Sequence[str] = SCHEMA_SCRIPT_FILES,
+    schema_dir: Optional[Path] = None,
+) -> int:
+    """Execute all allowlisted Neo4j DDL schema statements synchronously (safe for Pykka actors)."""
+    target_client = client or neo4j_client
+    statements = load_schema_statements(script_files=script_files, schema_dir=schema_dir)
+    driver = target_client.get_sync_driver()
+    with driver.session(database=target_client.settings.DB_DATABASE) as session:
+        for stmt in statements:
+            try:
+                session.run(cast(LiteralString, stmt.statement)).consume()
+            except Exception as exc:
+                err_line, err_col = extract_error_location(stmt, exc)
+                msg = (
+                    f"Failed executing schema statement #{stmt.statement_index} in '{stmt.source_file}' "
+                    f"({stmt.line_range_label}): {exc}"
+                )
+                logger.error(
+                    "schema_statement_execution_failed",
+                    script_file=stmt.source_file,
+                    statement_index=stmt.statement_index,
+                    error_line=err_line,
+                    error_column=err_col,
+                    error=str(exc),
+                )
+                raise SchemaInitializationError(
+                    msg,
+                    script_file=stmt.source_file,
+                    start_line=stmt.start_line,
+                    end_line=stmt.end_line,
+                    error_line=err_line,
+                    error_column=err_col,
+                    statement_index=stmt.statement_index,
+                    statement=stmt.statement,
+                    cause=exc,
+                ) from exc
+
+    logger.info("neo4j_schema_initialized", statement_count=len(statements), scripts=list(script_files))
+    return len(statements)

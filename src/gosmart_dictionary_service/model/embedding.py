@@ -7,15 +7,26 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar, Dict, List, Optional
 
-from gosmart_graphite.model.auditable import AuditableNode, AuditableRelation, generate_deterministic_id
 from pydantic import Field, field_validator, model_validator
+
+from gosmart_dictionary_service.model.auditable import AuditableNode, AuditableRelation, generate_deterministic_id
 
 DEFAULT_EMBEDDING_VECTOR_DIMENSIONS: int = 768
 EMBEDDING_VECTOR_INDEX_NAME: str = "embedding_vector_idx"
 
 
+class DictionaryEmbeddingFieldTag(StrEnum):
+    """Canonical targetFieldTag / aspect values for terminology & DICOM dictionary embeddings."""
+
+    NAME = "NAME"
+    DESCRIPTION = "DESCRIPTION"
+    DISPLAY = "DISPLAY"
+    SYNONYM = "SYNONYM"
+    DEFINITION = "DEFINITION"
+
+
 class DiagnosticReportFieldTag(StrEnum):
-    """Canonical targetFieldTag / aspect values for DiagnosticReport embeddings."""
+    """Legacy clinical field tags retained for compatibility."""
 
     FINDINGS = "FINDINGS"
     CONCLUSION = "CONCLUSION"
@@ -46,9 +57,7 @@ class Embedding(AuditableNode):
     )
     targetFieldTag: str = Field(
         ...,
-        description=(
-            "Tag identifying the field on the target node that the vector represents (e.g. 'FINDINGS', 'CONCLUSION')"
-        ),
+        description="Target field tag represented by the vector (e.g. 'NAME', 'DESCRIPTION')",
     )
     target_node_id: Optional[str] = Field(
         default=None,
@@ -59,6 +68,8 @@ class Embedding(AuditableNode):
     @field_validator("modelTag", "targetFieldTag", "text", mode="before")
     @classmethod
     def validate_required_tag(cls, v: Any) -> str:
+        if isinstance(v, StrEnum):
+            v = v.value
         if not isinstance(v, str) or not v.strip():
             raise ValueError("Field must be a non-empty string.")
         return v.strip()
@@ -144,7 +155,8 @@ class Embedding(AuditableNode):
         """Compute a deterministic UUIDv5 scoped to (target_node_id, modelTag, targetFieldTag[, test_id])."""
         clean_target = target_node_id.strip() if isinstance(target_node_id, str) else ""
         clean_model_tag = model_tag.strip() if isinstance(model_tag, str) else ""
-        clean_field_tag = target_field_tag.strip() if isinstance(target_field_tag, str) else ""
+        raw_field = target_field_tag.value if isinstance(target_field_tag, StrEnum) else target_field_tag
+        clean_field_tag = raw_field.strip() if isinstance(raw_field, str) else ""
         if not clean_target or not clean_model_tag or not clean_field_tag:
             raise ValueError(
                 "target_node_id, model_tag, and target_field_tag must all be non-empty "
@@ -179,9 +191,7 @@ class EmbedsRelation(AuditableRelation):
 
     aspect: Optional[str] = Field(
         default=None,
-        description=(
-            "Tag identifying the aspect of the target node associated with the vector (e.g. 'FINDINGS', 'CONCLUSION')"
-        ),
+        description="Target node aspect associated with the vector (e.g. 'NAME', 'DESCRIPTION')",
     )
 
     @field_validator("aspect", mode="before")
@@ -189,6 +199,8 @@ class EmbedsRelation(AuditableRelation):
     def normalize_aspect(cls, v: Any) -> Optional[str]:
         if v is None:
             return None
+        if isinstance(v, StrEnum):
+            v = v.value
         if isinstance(v, str):
             stripped = v.strip()
             return stripped if stripped else None
@@ -198,6 +210,7 @@ class EmbedsRelation(AuditableRelation):
 __all__ = [
     "DEFAULT_EMBEDDING_VECTOR_DIMENSIONS",
     "EMBEDDING_VECTOR_INDEX_NAME",
+    "DictionaryEmbeddingFieldTag",
     "DiagnosticReportFieldTag",
     "Embedding",
     "EmbeddingNode",

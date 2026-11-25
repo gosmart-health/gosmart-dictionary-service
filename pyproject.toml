@@ -5,10 +5,16 @@ description = "Gosmart.Health Dictionary Service — terminology dictionary API 
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "argon2-cffi>=25.1.0",
+    "cryptography>=50.0.2",
     "fastapi>=0.165.0",
     "genkit>=0.14.0",
+    "genkit-google-genai>=0.14.0",
+    "genkit-ollama>=0.14.0",
     "neo4j>=6.4.1",
     "pydantic-settings>=2.16.3",
+    "pyjwt>=2.15.1",
+    "pykka>=4.5.0",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.54.0",
 ]
@@ -28,6 +34,9 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "httpx2>=2.16.2",
+    "ipykernel>=7.4.0",
+    "matplotlib>=3.11.2",
+    "pandas>=3.1.1",
     "pytest>=9.2.0",
     "ruff>=0.17.6",
 ]

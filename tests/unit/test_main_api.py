@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from gosmart_dictionary_service import __version__
 from gosmart_dictionary_service.core.config import get_settings
+from gosmart_dictionary_service.db.schema_loader import SchemaInitializationError
 from gosmart_dictionary_service.main import app, create_app
 from tests.conftest import make_test_settings
 
@@ -85,6 +86,11 @@ def test_structlog_middleware_writes_request_events_to_log_file(monkeypatch: pyt
             "gosmart_dictionary_service.db.neo4j.Neo4jClient.verify_connectivity", AsyncMock(return_value=True)
         )
         monkeypatch.setattr("gosmart_dictionary_service.db.neo4j.Neo4jClient.close", AsyncMock())
+        monkeypatch.setattr("gosmart_dictionary_service.main.apply_schema_async", AsyncMock(return_value=0))
+        monkeypatch.setattr(
+            "gosmart_dictionary_service.main.system_service.bootstrap_system",
+            AsyncMock(return_value={"success": True}),
+        )
 
         test_app = create_app()
         try:
@@ -111,6 +117,64 @@ def test_structlog_middleware_writes_request_events_to_log_file(monkeypatch: pyt
         finally:
             _cleanup_file_handlers()
             get_settings.cache_clear()
+
+
+def test_lifespan_applies_schema_and_bootstraps_system_when_connected(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_test_settings(DEV_MODE=True, LOG_TO_FILE=False)
+    get_settings.cache_clear()
+    apply_schema_mock = AsyncMock(return_value=12)
+    bootstrap_mock = AsyncMock(return_value={"success": True})
+
+    monkeypatch.setattr("gosmart_dictionary_service.core.config.get_settings", lambda: settings)
+    monkeypatch.setattr("gosmart_dictionary_service.core.logging.get_settings", lambda: settings)
+    monkeypatch.setattr("gosmart_dictionary_service.main.get_settings", lambda: settings)
+    monkeypatch.setattr("gosmart_dictionary_service.db.neo4j.Neo4jClient.connect", AsyncMock())
+    monkeypatch.setattr(
+        "gosmart_dictionary_service.db.neo4j.Neo4jClient.verify_connectivity", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr("gosmart_dictionary_service.db.neo4j.Neo4jClient.close", AsyncMock())
+    monkeypatch.setattr("gosmart_dictionary_service.main.apply_schema_async", apply_schema_mock)
+    monkeypatch.setattr("gosmart_dictionary_service.main.system_service.bootstrap_system", bootstrap_mock)
+
+    test_app = create_app()
+    try:
+        with TestClient(test_app):
+            pass
+        apply_schema_mock.assert_awaited_once()
+        bootstrap_mock.assert_awaited_once_with(
+            acted_by="startup",
+            settings=settings,
+            ensure_schema=False,
+            seed_default_llm_configs=True,
+        )
+    finally:
+        get_settings.cache_clear()
+
+
+def test_lifespan_fails_closed_on_schema_initialization_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_test_settings(DEV_MODE=True, LOG_TO_FILE=False)
+    get_settings.cache_clear()
+
+    monkeypatch.setattr("gosmart_dictionary_service.core.config.get_settings", lambda: settings)
+    monkeypatch.setattr("gosmart_dictionary_service.core.logging.get_settings", lambda: settings)
+    monkeypatch.setattr("gosmart_dictionary_service.main.get_settings", lambda: settings)
+    monkeypatch.setattr("gosmart_dictionary_service.db.neo4j.Neo4jClient.connect", AsyncMock())
+    monkeypatch.setattr(
+        "gosmart_dictionary_service.db.neo4j.Neo4jClient.verify_connectivity", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr("gosmart_dictionary_service.db.neo4j.Neo4jClient.close", AsyncMock())
+    monkeypatch.setattr(
+        "gosmart_dictionary_service.main.apply_schema_async",
+        AsyncMock(side_effect=SchemaInitializationError("DDL failure", script_file="dicom_schema.cypher")),
+    )
+
+    test_app = create_app()
+    try:
+        with pytest.raises(SchemaInitializationError):
+            with TestClient(test_app):
+                pass
+    finally:
+        get_settings.cache_clear()
 
 
 def test_lifespan_fails_when_neo4j_offline_in_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:

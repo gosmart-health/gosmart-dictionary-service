@@ -1,8 +1,13 @@
+"""Graph entity models for users, identities, authenticators, and organizational groups."""
+
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any, ClassVar, Dict, List, Optional
 
-from gosmart_graphite.model.auditable import AuditableNode, AuditableRelation
 from pydantic import Field, field_validator
+
+from gosmart_dictionary_service.model.auditable import AuditableNode, AuditableRelation
 
 
 class UserNode(AuditableNode):
@@ -79,7 +84,7 @@ class AuthenticatorNode(AuditableNode):
         description="Type of authenticator: 'password', 'api_key', 'passkey', 'totp'",
     )
     secret_hash: str = Field(..., description="Argon2 hash for password or SHA-256 hash for API key")
-    prefix: Optional[str] = Field(default=None, description="Key prefix (e.g. 'gs_live_') for fast lookup")
+    prefix: Optional[str] = Field(default=None, description="Key prefix (e.g. 'gs_dict_') for fast lookup")
     name: Optional[str] = Field(default=None, description="Human-readable label (e.g. 'MacBook Pro CLI', 'MCP Agent')")
     scopes: List[str] = Field(default_factory=lambda: ["*"], description="Authorized permission scopes")
     expires_at: Optional[datetime] = Field(default=None, description="Credential expiration timestamp")
@@ -97,15 +102,15 @@ class AuthenticatorNode(AuditableNode):
 
 
 class GroupNode(AuditableNode):
-    """Graph node representing an organization, hospital system, facility, department, or care team."""
+    """Graph node representing an organization, health system, or platform root group."""
 
     __label__: ClassVar[str] = "Group"
 
-    name: str = Field(..., description="Organization or facility name (e.g. 'Half Moon Bay Clinic')")
-    code: str = Field(..., description="Unique alphanumeric code/slug (e.g. 'HMB_IMG_01')")
+    name: str = Field(..., description="Organization or group name (e.g. 'GoSmart Health')")
+    code: str = Field(..., description="Unique alphanumeric code/slug (e.g. 'GOSMART_HEALTH')")
     group_type: str = Field(
-        default="FACILITY",
-        description="Group type: HEALTH_SYSTEM | HOSPITAL | FACILITY | DEPARTMENT | CARE_TEAM",
+        default="HEALTH_SYSTEM",
+        description="Group type: HEALTH_SYSTEM | HOSPITAL | FACILITY | DEPARTMENT | CARE_TEAM | SYSTEM",
     )
     is_active: bool = Field(default=True, description="Whether the group is active")
     description: Optional[str] = Field(default=None, description="Detailed description")
@@ -116,16 +121,24 @@ class GroupNode(AuditableNode):
         return v.strip().upper() if isinstance(v, str) else v
 
     def get_identity_subset(self) -> Dict[str, Any]:
-        return {
+        subset: Dict[str, Any] = {
             "entity": self.__label__,
             "code": self.code.upper().strip(),
         }
+        if self.test_id:
+            subset["test_id"] = self.test_id
+        return subset
+
+    def to_neo4j_properties(self) -> Dict[str, Any]:
+        """Serialize model fields into Neo4j-compatible primitives."""
+        data = self.model_dump()
+        for key, val in list(data.items()):
+            if isinstance(val, datetime):
+                data[key] = val.isoformat()
+        return data
 
 
 Group = GroupNode
-
-
-# Graph Relationships for Auth, Groups, and Tenancy
 
 
 class HasIdentityRelation(AuditableRelation):
@@ -153,7 +166,7 @@ class MemberOfRelation(AuditableRelation):
 
     roles: List[str] = Field(
         default_factory=lambda: ["Viewer"],
-        description="Group-specific roles (e.g. ['Admin'], ['Viewer'], ['Editor'], ['Radiologist'], ['Nurse'])",
+        description="Group-specific roles (e.g. ['Admin'], ['Viewer'], ['Editor'])",
     )
     permissions: List[str] = Field(
         default_factory=list,
@@ -167,30 +180,20 @@ class MemberOfRelation(AuditableRelation):
 
 
 class BelongsToRelation(AuditableRelation):
-    """Relationship connecting Patient/Encounter -> Group, Child Group -> Parent Group, or Root Group -> System."""
+    """Relationship connecting Root Group -> System or Child Group -> Parent Group."""
 
     __type__: ClassVar[str] = "BELONGS_TO"
 
 
-class PerformedAtRelation(AuditableRelation):
-    """Relationship connecting Study -> Group."""
-
-    __type__: ClassVar[str] = "PERFORMED_AT"
-
-
-class ScopedToRelation(AuditableRelation):
-    """Relationship connecting DICOMConfiguration -> Group."""
-
-    __type__: ClassVar[str] = "SCOPED_TO"
-
-
-class ServesRelation(AuditableRelation):
-    """Relationship connecting DICOMConfiguration -> Group with 'SERVES' relation type."""
-
-    __type__: ClassVar[str] = "SERVES"
-
-
-class HasLostAndFoundRelation(AuditableRelation):
-    """Relationship connecting System -> LostAndFound Group for operational recovery of unassociated nodes."""
-
-    __type__: ClassVar[str] = "HAS_LOST_AND_FOUND"
+__all__ = [
+    "UserNode",
+    "IdentityNode",
+    "AuthenticatorNode",
+    "GroupNode",
+    "Group",
+    "HasIdentityRelation",
+    "UsesAuthenticatorRelation",
+    "HasAuthenticatorRelation",
+    "MemberOfRelation",
+    "BelongsToRelation",
+]

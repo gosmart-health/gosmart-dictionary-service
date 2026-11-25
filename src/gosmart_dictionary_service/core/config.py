@@ -127,6 +127,57 @@ class Settings(BaseSettings):
         description="Neo4j Aura Instance Name (optional metadata)",
     )
 
+    # Default LLM & Vector Embedding Bootstrap Configuration
+    VECTOR_EMBED_PROVIDER: str = Field(
+        default="ollama",
+        description="Default vector embedding LLM provider (e.g. 'ollama', 'vertexai', 'googleai')",
+    )
+    VECTOR_EMBED_SERVER_URL: str = Field(
+        default="http://localhost:11434",
+        description="Default vector embedding server base URL (for Ollama or custom endpoints)",
+    )
+    VECTOR_EMBED_MODEL: str = Field(
+        default="embeddinggemma-2:270m",
+        description="Default vector embedding model name (e.g. 'embeddinggemma-2:270m', 'gemini-embedding-001')",
+    )
+    VECTOR_EMBED_DIMENSIONS: int = Field(
+        default=768,
+        gt=0,
+        description="Default output vector dimensionality (default: 768)",
+    )
+    VECTOR_EMBED_TAG: str = Field(
+        default="embedding-v1",
+        description="Default LLM_Config tag used for vector embedding computation",
+    )
+    INFERENCE_PROVIDER: str = Field(
+        default="ollama",
+        description="Default inference LLM provider (e.g. 'ollama', 'vertexai', 'googleai')",
+    )
+    INFERENCE_SERVER_URL: str = Field(
+        default="http://localhost:11434",
+        description="Default inference LLM server base URL",
+    )
+    INFERENCE_MODEL: str = Field(
+        default="gemma4:e2b",
+        description="Default inference LLM model name (e.g. 'gemma4:e2b', 'gemini-2.5-flash')",
+    )
+    INFERENCE_TAG: str = Field(
+        default="inference-v1",
+        description="Default LLM_Config tag used for inference and disambiguation flows",
+    )
+    VERTEX_AI_API_KEY: Optional[SecretStr] = Field(
+        default=None,
+        description="Optional Google Cloud / Vertex AI API key (referenced via '${GOSMART_DS_VERTEX_AI_API_KEY}')",
+    )
+    VERTEX_AI_LOCATION: str = Field(
+        default="us-central1",
+        description="Default Google Cloud / Vertex AI region",
+    )
+    VERTEX_AI_PROJECT_ID: Optional[str] = Field(
+        default=None,
+        description="Optional Google Cloud Project ID for Vertex AI",
+    )
+
     # Dynamic LLM Configuration Security Settings
     LLM_CONFIG_ENCRYPTION_KEY: Optional[SecretStr] = Field(
         default=None,

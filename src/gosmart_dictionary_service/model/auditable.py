@@ -7,8 +7,10 @@ from typing import Any, ClassVar, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-# Default namespace for deterministic DICOM graph entity ID derivation
-DICOM_GRAPH_NAMESPACE: uuid.UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "gosmart.dicom.graph")
+# Default namespace for deterministic dictionary graph entity ID derivation
+DICTIONARY_GRAPH_NAMESPACE: uuid.UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "gosmart.dictionary.graph")
+# Backward-compatible alias for earlier scaffold references
+DICOM_GRAPH_NAMESPACE: uuid.UUID = DICTIONARY_GRAPH_NAMESPACE
 
 ActionType = Literal["CREATE", "UPDATE", "DELETE", "RESTORE"]
 
@@ -22,7 +24,7 @@ def generate_deterministic_id(
     Ensures canonical serialization: keys sorted, compact delimiters,
     and UTF-8 encoding before applying UUIDv5 hashing.
     """
-    ns = namespace or DICOM_GRAPH_NAMESPACE
+    ns = namespace or DICTIONARY_GRAPH_NAMESPACE
     canonical_json = json.dumps(subset, sort_keys=True, separators=(",", ":"), default=str)
     return str(uuid.uuid5(ns, canonical_json))
 
@@ -124,11 +126,14 @@ class AuditableRelation(Auditable):
 
     def get_identity_subset(self) -> Dict[str, Any]:
         """Return the dictionary subset used to compute the deterministic relationship ID."""
-        return {
+        subset: Dict[str, Any] = {
             "start_node_id": self.start_node_id,
             "type": self.__type__,
             "end_node_id": self.end_node_id,
         }
+        if self.test_id:
+            subset["test_id"] = self.test_id
+        return subset
 
     def compute_id(self) -> str:
         """Compute the deterministic relationship ID."""
@@ -158,6 +163,7 @@ class AuditableRelation(Auditable):
 
 
 __all__ = [
+    "DICTIONARY_GRAPH_NAMESPACE",
     "DICOM_GRAPH_NAMESPACE",
     "ActionType",
     "generate_deterministic_id",

@@ -1,8 +1,54 @@
-from datetime import datetime
-from typing import Dict, List, Optional
+"""Domain node and API models for the root System entity."""
 
-from gosmart_graphite.model.dicom_config import DICOMConfigurationResponse
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, ClassVar, Dict, List, Optional
+
 from pydantic import BaseModel, Field
+
+from gosmart_dictionary_service.model.auditable import AuditableNode
+
+DEFAULT_SYSTEM_NAME = "GoSmart Health Dictionary Service"
+DEFAULT_SYSTEM_OWNER = "GoSmart Health"
+DEFAULT_SYSTEM_ADDRESS = "Half Moon Bay, California"
+DEFAULT_SYSTEM_EMAIL = "admin@gosmart.health"
+DEFAULT_SYSTEM_PHONE = "+1 (650) 535-0097"
+DEFAULT_SYSTEM_SERIAL_NUMBER = "GSH-DS-0001"
+
+
+class SystemNode(AuditableNode):
+    """Auditable graph node representing the root GoSmart DS platform instance (``:System``)."""
+
+    __label__: ClassVar[str] = "System"
+
+    name: str = Field(default=DEFAULT_SYSTEM_NAME, description="Name of the system")
+    owner: str = Field(default=DEFAULT_SYSTEM_OWNER, description="Owner user or organization")
+    address: str = Field(default=DEFAULT_SYSTEM_ADDRESS, description="Physical address string")
+    email: str = Field(default=DEFAULT_SYSTEM_EMAIL, description="Contact email address (non-auth)")
+    phone: str = Field(default=DEFAULT_SYSTEM_PHONE, description="Contact phone number (non-auth)")
+    serial_number: str = Field(default=DEFAULT_SYSTEM_SERIAL_NUMBER, description="System serial number")
+    installed_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Installation UTC timestamp",
+    )
+
+    def get_identity_subset(self) -> Dict[str, Any]:
+        subset: Dict[str, Any] = {
+            "entity": self.__label__,
+            "serial_number": self.serial_number.strip(),
+        }
+        if self.test_id:
+            subset["test_id"] = self.test_id
+        return subset
+
+    def to_neo4j_properties(self) -> Dict[str, Any]:
+        """Serialize model fields into Neo4j-compatible primitives."""
+        data = self.model_dump()
+        for key, val in list(data.items()):
+            if isinstance(val, datetime):
+                data[key] = val.isoformat()
+        return data
 
 
 class SystemResponse(BaseModel):
@@ -20,11 +66,6 @@ class SystemResponse(BaseModel):
     action: Optional[str] = Field(default="CREATE", description="Auditable action state")
     created_at: Optional[datetime] = Field(default=None, description="Created timestamp (UTC)")
     updated_at: Optional[datetime] = Field(default=None, description="Updated timestamp (UTC)")
-    configurations_count: int = Field(default=0, description="Number of linked DICOM configurations")
-    configurations: List[DICOMConfigurationResponse] = Field(
-        default_factory=list,
-        description="Linked DICOM configurations",
-    )
 
     model_config = {"populate_by_name": True}
 
@@ -42,23 +83,39 @@ class SystemUpdateRequest(BaseModel):
 
 
 class SystemBootstrapResponse(BaseModel):
-    """API response model for system bootstrapping."""
+    """API / service response model for system, root group, and default LLM_Config bootstrapping."""
 
     success: bool = Field(..., description="Whether bootstrap succeeded")
     message: str = Field(..., description="Bootstrap status message")
     system: SystemResponse = Field(..., description="System node representation")
-    promiscuous_config: Optional[DICOMConfigurationResponse] = Field(
-        default=None,
-        description="Promiscuous main DICOM configuration",
+    root_group: Dict[str, Any] = Field(default_factory=dict, description="Top-level GoSmart Health Group node")
+    llm_configs: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Sanitized default LLM_Config entries seeded on the root Group",
     )
 
 
 class TestCleanupResponse(BaseModel):
-    """API response model for test data cleanup."""
+    """API / service response model for scoped test data cleanup."""
 
     success: bool = Field(..., description="Whether cleanup succeeded")
     message: str = Field(..., description="Status message")
     total_deleted: int = Field(default=0, description="Total count of nodes detached and deleted")
     deleted_by_label: Dict[str, int] = Field(default_factory=dict, description="Breakdown of deleted nodes by label")
     labels_cleaned: List[str] = Field(default_factory=list, description="List of labels scanned and cleaned")
-    test_id: Optional[str] = Field(default=None, description="Test identifier that was cleaned up if filtered")
+    test_id: Optional[str] = Field(default=None, description="Test identifier that was cleaned up")
+
+
+__all__ = [
+    "DEFAULT_SYSTEM_NAME",
+    "DEFAULT_SYSTEM_OWNER",
+    "DEFAULT_SYSTEM_ADDRESS",
+    "DEFAULT_SYSTEM_EMAIL",
+    "DEFAULT_SYSTEM_PHONE",
+    "DEFAULT_SYSTEM_SERIAL_NUMBER",
+    "SystemNode",
+    "SystemResponse",
+    "SystemUpdateRequest",
+    "SystemBootstrapResponse",
+    "TestCleanupResponse",
+]

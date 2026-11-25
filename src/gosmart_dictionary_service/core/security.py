@@ -11,7 +11,8 @@ import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from cryptography.fernet import Fernet, InvalidToken
-from gosmart_graphite.core.config import get_settings
+
+from gosmart_dictionary_service.core.config import get_settings
 
 # Standard Argon2id password hasher (OWASP recommended defaults)
 _password_hasher = PasswordHasher()
@@ -40,14 +41,7 @@ def hash_api_key(raw_api_key: str) -> str:
 
 
 def generate_api_key(prefix: Optional[str] = None) -> Tuple[str, str, str]:
-    """Generate a secure, random API key with prefix, returning (raw_key, prefix, sha256_hash).
-
-    Returns:
-        Tuple containing:
-        - raw_api_key: The full plaintext key (e.g. 'gs_live_abc123...') to show to user once
-        - prefix: The key prefix used for indexing/lookup (e.g. 'gs_live_')
-        - sha256_hash: The SHA-256 hash to store securely in the database
-    """
+    """Generate a secure, random API key with prefix, returning (raw_key, prefix, sha256_hash)."""
     settings = get_settings()
     key_prefix = prefix or settings.API_KEY_PREFIX
     random_bytes = secrets.token_urlsafe(32)
@@ -70,7 +64,7 @@ def _get_effective_llm_encryption_key(explicit_key: Optional[str] = None) -> Opt
     if settings.LLM_CONFIG_ENCRYPTION_KEY is not None:
         cleaned = settings.LLM_CONFIG_ENCRYPTION_KEY.get_secret_value().strip()
         return cleaned if cleaned else None
-    env_fallback = os.environ.get("GOSMART_GS_LLM_CONFIG_ENCRYPTION_KEY", "").strip()
+    env_fallback = os.environ.get("GOSMART_DS_LLM_CONFIG_ENCRYPTION_KEY", "").strip()
     return env_fallback if env_fallback else None
 
 
@@ -106,7 +100,7 @@ def encrypt_llm_api_key(raw_value: Optional[str], encryption_key: Optional[str] 
     """Prepare an LLM API key for Neo4j storage.
 
     - Empty strings stay empty.
-    - `${ENV_VAR}` references are stored literally so runtime reads from os.environ.
+    - `${ENV_VAR}` references are stored literally so runtime reads from env / Settings.
     - Already-encrypted `enc:fernet:...` values are preserved as-is.
     - Literal secrets are encrypted with Fernet when `LLM_CONFIG_ENCRYPTION_KEY` is configured.
     """
@@ -125,10 +119,26 @@ def encrypt_llm_api_key(raw_value: Optional[str], encryption_key: Optional[str] 
     return f"{_FERNET_PREFIX}{token}"
 
 
+def _lookup_env_or_settings(var_name: str) -> Optional[str]:
+    """Resolve an env var from ``os.environ`` first, falling back to ``Settings`` for ``GOSMART_DS_*``."""
+    resolved = os.environ.get(var_name)
+    if resolved is not None and resolved.strip():
+        return resolved.strip()
+    if var_name.startswith("GOSMART_DS_"):
+        attr_name = var_name.removeprefix("GOSMART_DS_")
+        settings_val = getattr(get_settings(), attr_name, None)
+        if settings_val is not None:
+            raw = settings_val.get_secret_value() if hasattr(settings_val, "get_secret_value") else str(settings_val)
+            if raw.strip():
+                return raw.strip()
+    return None
+
+
 def resolve_llm_api_key(stored_value: Optional[str], encryption_key: Optional[str] = None) -> str:
     """Resolve a stored LLM_Config api_key into a runtime credential.
 
-    Decrypts `enc:fernet:...` payloads and expands `${ENV_VAR}` placeholders from `os.environ`.
+    Decrypts `enc:fernet:...` payloads and expands `${ENV_VAR}` placeholders from
+    `os.environ` (or `.env`-loaded `Settings` for `GOSMART_DS_*` variables).
     """
     if not stored_value or not stored_value.strip():
         return ""
@@ -137,7 +147,7 @@ def resolve_llm_api_key(stored_value: Optional[str], encryption_key: Optional[st
     if val.startswith(_FERNET_PREFIX):
         effective_key = _get_effective_llm_encryption_key(encryption_key)
         if not effective_key:
-            raise ValueError("Cannot decrypt stored LLM api_key: GOSMART_GS_LLM_CONFIG_ENCRYPTION_KEY is not set.")
+            raise ValueError("Cannot decrypt stored LLM api_key: GOSMART_DS_LLM_CONFIG_ENCRYPTION_KEY is not set.")
         token = val[len(_FERNET_PREFIX) :].encode("utf-8")
         try:
             fernet = _build_fernet(effective_key)
@@ -147,10 +157,10 @@ def resolve_llm_api_key(stored_value: Optional[str], encryption_key: Optional[st
 
     def _replace_env(match: re.Match[str]) -> str:
         var_name = match.group(1)
-        resolved = os.environ.get(var_name)
-        if resolved is None or not resolved.strip():
+        resolved = _lookup_env_or_settings(var_name)
+        if resolved is None:
             raise ValueError(f"Environment variable '{var_name}' referenced by LLM_Config api_key is not set.")
-        return resolved.strip()
+        return resolved
 
     if "${" in val:
         val = _ENV_VAR_SUB_RE.sub(_replace_env, val)

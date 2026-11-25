@@ -49,7 +49,7 @@ def isolated_app_lifespan() -> Iterator[None]:
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """An in-process HTTP client with mocked Neo4j and file logging disabled."""
+    """An in-process HTTP client with mocked Neo4j, schema init, bootstrap, and file logging disabled."""
     test_settings = make_test_settings(
         DEV_MODE=True,
         LOG_TO_FILE=False,
@@ -64,6 +64,11 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
         "gosmart_dictionary_service.db.neo4j.Neo4jClient.verify_connectivity", AsyncMock(return_value=True)
     )
     monkeypatch.setattr("gosmart_dictionary_service.db.neo4j.Neo4jClient.close", AsyncMock())
+    monkeypatch.setattr("gosmart_dictionary_service.main.apply_schema_async", AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        "gosmart_dictionary_service.main.system_service.bootstrap_system",
+        AsyncMock(return_value={"success": True}),
+    )
 
     fastapi_app = create_app()
     fastapi_app.dependency_overrides[get_settings] = lambda: test_settings

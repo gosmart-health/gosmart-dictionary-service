@@ -11,8 +11,9 @@ LLM flows for terminology resolution and enrichment.
 | API         | [`fastapi`](https://fastapi.tiangolo.com/) + `uvicorn[standard]` |
 | Config      | [`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (`GOSMART_DS_*`) |
 | Logging     | [`structlog`](https://www.structlog.org/) + 7-day rotating JSON file logs |
-| LLM flows   | [`genkit`](https://python.api.genkit.dev/)                       |
+| LLM flows   | [`genkit`](https://python.api.genkit.dev/) (`genkit-ollama`, `genkit-google-genai`) |
 | Graph store | [`neo4j`](https://neo4j.com/docs/python-manual/current/)         |
+| Concurrency | [`pykka`](https://pykka.readthedocs.io/) (Actor Model)           |
 | Docs site   | [`zensical`](https://zensical.org/) (`docs` dependency group)    |
 
 ## Requirements
@@ -29,16 +30,19 @@ gosmart-dictionary-service/
 ├── src/
 │   └── gosmart_dictionary_service/    # Importable package (src layout)
 │       ├── __init__.py                # Package docstring + __version__
-│       ├── __main__.py                # `python -m gosmart_dictionary_service`
+│       ├── __main__.py                # CLI (`gosmart-ds serve | bootstrap | ingest-dicom`)
 │       ├── main.py                    # FastAPI app factory, lifespan & request logging middleware
-│       ├── core/                      # Settings (`GOSMART_DS_*`) & structlog logging setup
-│       ├── db/                        # Neo4j async/sync driver & Cypher schema loader
+│       ├── core/                      # Settings (`GOSMART_DS_*`), security & structlog setup
+│       ├── db/                        # Neo4j async/sync driver & Cypher schema loader/DDL
 │       ├── api/                       # Versioned REST endpoints (`/api/v1`)
-│       ├── model/                     # Pydantic domain models
-│       └── service/                   # Core business services
+│       ├── actor/                     # Pykka ThreadingActors (DicomIngestionActor, EmbeddingActor)
+│       ├── ingestor/                  # Batched Neo4j dictionary ingesters (DicomIngesterService)
+│       ├── model/                     # Pydantic domain models (System, Group, LLM_Config, Embedding, DICOM)
+│       └── service/                   # Core business services (SystemService, LLMConfigService, EmbeddingService)
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (TestClient)
-│   └── unit/                          # Unit tests
+│   ├── unit/                          # Unit tests
+│   └── integration/                   # Live Neo4j integration tests (auto-skip when offline)
 └── docs/
     └── zensical/                      # Documentation site source
 ```
@@ -58,6 +62,19 @@ Configuration is loaded from `.env` (and environment variables prefixed with `GO
 | `GOSMART_DS_RELOAD` | `true` | Uvicorn auto-reload |
 | `GOSMART_DS_DEV_MODE` | `false` | Allow startup if Neo4j is unreachable |
 | `GOSMART_DS_DB_CONNECTION_URI` | `bolt://localhost:7688` | Dedicated Neo4j Bolt URI |
+| `GOSMART_DS_VECTOR_EMBED_PROVIDER` | `ollama` | Default embedding provider (`ollama`, `vertexai`, `googleai`) |
+| `GOSMART_DS_VECTOR_EMBED_SERVER_URL` | `http://localhost:11434` | Default Ollama/custom embedding server URL |
+| `GOSMART_DS_VECTOR_EMBED_MODEL` | `embeddinggemma-2:270m` | Default vector embedding model name |
+| `GOSMART_DS_VECTOR_EMBED_DIMENSIONS` | `768` | Output vector dimensionality for Neo4j vector index |
+| `GOSMART_DS_VECTOR_EMBED_TAG` | `embedding-v1` | Default `LLM_Config.tag` seeded for embeddings |
+| `GOSMART_DS_INFERENCE_PROVIDER` | `ollama` | Default inference provider (`ollama`, `vertexai`, `googleai`) |
+| `GOSMART_DS_INFERENCE_SERVER_URL` | `http://localhost:11434` | Default Ollama/custom inference server URL |
+| `GOSMART_DS_INFERENCE_MODEL` | `gemma4:e2b` | Default inference model name |
+| `GOSMART_DS_INFERENCE_TAG` | `inference-v1` | Default `LLM_Config.tag` seeded for inference |
+| `GOSMART_DS_VERTEX_AI_API_KEY` | *(unset)* | Optional Vertex AI / Google AI API key (referenced via `${GOSMART_DS_VERTEX_AI_API_KEY}`) |
+| `GOSMART_DS_VERTEX_AI_LOCATION` | `us-central1` | Default Google Cloud / Vertex AI region |
+| `GOSMART_DS_VERTEX_AI_PROJECT_ID` | *(unset)* | Optional Google Cloud Project ID for Vertex AI |
+| `GOSMART_DS_LLM_CONFIG_ENCRYPTION_KEY` | *(unset)* | Optional Fernet passphrase/key to encrypt literal LLM API keys at rest |
 | `GOSMART_DS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 | `GOSMART_DS_LOG_FORMAT` | `json` | Console renderer: `json` or `console` |
 | `GOSMART_DS_LOG_DIR` | `./logs` | Rotating log file output directory |
@@ -74,9 +91,18 @@ uv sync --all-groups
 
 # Start the API server (default port 8081)
 uv run python -m gosmart_dictionary_service
+# ...or explicitly via CLI
+uv run gosmart-ds serve
 
-# ...or directly through uvicorn
-uv run uvicorn gosmart_dictionary_service.main:app --port 8081 --reload
+# Bootstrap Neo4j schema + :System + 'GoSmart Health' :Group + default :LLM_Config nodes
+uv run gosmart-ds bootstrap
+
+# Validate DICOM seed files (dry run — zero DB writes)
+uv run gosmart-ds ingest-dicom --source-dir ./data-source/dicom --dry-run
+
+# Ingest DICOM standard dictionary into Neo4j (and optionally compute 768-dim embeddings)
+uv run gosmart-ds ingest-dicom --source-dir ./data-source/dicom --bootstrap
+uv run gosmart-ds ingest-dicom --source-dir ./data-source/dicom --bootstrap --compute-embeddings
 ```
 
 Interactive API docs: <http://127.0.0.1:8081/docs>.

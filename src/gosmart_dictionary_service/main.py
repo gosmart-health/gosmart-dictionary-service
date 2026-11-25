@@ -14,7 +14,8 @@ from gosmart_dictionary_service.api.v1.router import api_v1_router
 from gosmart_dictionary_service.core.config import get_settings
 from gosmart_dictionary_service.core.logging import bind_log_context, clear_log_context, get_logger, setup_logging
 from gosmart_dictionary_service.db.neo4j import neo4j_client
-from gosmart_dictionary_service.db.schema_loader import SchemaInitializationError
+from gosmart_dictionary_service.db.schema_loader import SchemaInitializationError, apply_schema_async
+from gosmart_dictionary_service.service.system_service import system_service
 
 logger = get_logger("gosmart_ds.server")
 
@@ -58,7 +59,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     )
     logger.info("db_configured", db_connection=settings.DB_CONNECTION_URI, db_database=settings.DB_DATABASE)
 
-    # Initialize Neo4j Driver & verify connectivity
+    # Initialize Neo4j Driver, verify connectivity, apply schema, and bootstrap System + GoSmart Health + LLM_Config
     try:
         await neo4j_client.connect()
         connected = await neo4j_client.verify_connectivity()
@@ -67,6 +68,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 "neo4j_connected",
                 db_connection=settings.DB_CONNECTION_URI,
                 db_database=settings.DB_DATABASE,
+            )
+            await apply_schema_async(neo4j_client)
+            await system_service.bootstrap_system(
+                acted_by="startup",
+                settings=settings,
+                ensure_schema=False,
+                seed_default_llm_configs=True,
             )
         elif not settings.DEV_MODE:
             raise ConnectionError(f"Unable to verify Neo4j connectivity at {settings.DB_CONNECTION_URI}")
@@ -85,9 +93,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             raise
         logger.warning("neo4j_init_notice", error=str(e), dev_mode=True)
 
-    # NOTE: Background Pykka actors (AuditActor, IngestionActor, EmbeddingActor),
-    # schema initialization, admin bootstrap, and MCP session manager will be wired here
-    # as their respective modules are migrated.
+    # NOTE: Background Pykka actors (AuditActor, IngestionActor, EmbeddingActor)
+    # and MCP session manager will be wired here in Phase 2.
     yield
 
     # Clean shutdown
