@@ -1,0 +1,54 @@
+[project]
+name = "gosmart-dictionary-service"
+version = "0.1.0"
+description = "Gosmart.Health Dictionary Service — terminology dictionary API backed by a Neo4j knowledge graph and Genkit LLM flows"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.165.0",
+    "genkit>=0.14.0",
+    "neo4j>=6.4.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+gosmart-dictionary-service = "gosmart_dictionary_service.__main__:main"
+gosmart-ds = "gosmart_dictionary_service.__main__:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.2",
+    "pytest>=9.2.0",
+    "ruff>=0.17.6",
+]
+docs = [
+    "zensical>=0.1.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gosmart_dictionary_service"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["src", "."]
+extend-exclude = ["notebooks", "**/*.md"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "W",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gosmart_dictionary_service", "tests"]

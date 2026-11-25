@@ -221,3 +221,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Zensical docs build output and cache
+docs/zensical/site/
+docs/zensical/.cache/
+
+# Local runtime logs and scratch output
+logs/
+tmp/

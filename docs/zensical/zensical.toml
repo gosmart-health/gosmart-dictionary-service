@@ -1,0 +1,96 @@
+# Gosmart.Health Dictionary Service — Zensical site configuration.
+#
+# Build:   uv run --group docs zensical build --strict --clean   (from this directory)
+# Preview: uv run --group docs zensical serve                    (from this directory)
+#
+# Reverse-proxy deployment: the built `site/` directory is static HTML with
+# relative in-site links, so it can be served under any product slug. Set
+# `site_url` below to the final public URL (scheme + host + product slug);
+# it only affects canonical links, the sitemap, and social previews.
+
+[project]
+site_name = "Gosmart.Health Dictionary Service"
+site_description = "Gosmart.Health Dictionary Service — a terminology dictionary API: FastAPI, a Neo4j terminology knowledge graph, and Genkit LLM flows for terminology resolution and enrichment."
+site_author = "GoSmart Health"
+site_url = "https://gosmart.health/docs/dictionary-service"
+
+repo_name = "gosmart-health/gosmart-dictionary-service"
+repo_url = "https://github.com/gosmart-health/gosmart-dictionary-service"
+edit_uri = "edit/main/docs/zensical/docs/"
+
+copyright = "Copyright &copy; GoSmart Health &mdash; Licensed under Apache-2.0"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = [
+    { "Overview" = "getting-started/index.md" },
+  ] },
+  { "About" = [
+    { "License" = "about/license.md" },
+  ] },
+]
+
+[project.theme]
+variant = "modern"
+language = "en"
+features = [
+  "content.code.copy",
+  "content.code.select",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/gosmart-health/gosmart-dictionary-service"
+
+[[project.extra.social]]
+icon = "fontawesome/solid/globe"
+link = "https://gosmart.health"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
