@@ -23,6 +23,9 @@ Copy `.env.example` to `.env` to configure `GOSMART_DS_*` settings locally. Key 
 
 - `GOSMART_DS_PORT=8081` (FastAPI HTTP port)
 - `GOSMART_DS_DB_CONNECTION_URI=bolt://localhost:7688` (dedicated local Neo4j instance)
+- `GOSMART_DS_BREVO_API_KEY` (optional in `GOSMART_DS_DEV_MODE=true`; when unset in dev mode, registration verification links are logged and displayed locally)
+- `GOSMART_DS_BREVO_SENDER_EMAIL=no-reply@gosmart.health`, `GOSMART_DS_BREVO_SENDER_NAME`, `GOSMART_DS_PUBLIC_BASE_URL=http://127.0.0.1:8081`
+- `GOSMART_DS_SESSION_COOKIE_NAME=gosmart_ds_session`, `GOSMART_DS_SESSION_COOKIE_SECURE=false`
 - `GOSMART_DS_LOG_LEVEL=INFO`, `GOSMART_DS_LOG_FORMAT=json` (`json` or `console`)
 - `GOSMART_DS_LOG_DIR=./logs`, `GOSMART_DS_LOG_FILE=gosmart_ds.log` (7-day rotating JSON logs)
 
@@ -36,7 +39,9 @@ uv run python -m gosmart_dictionary_service
 uv run uvicorn gosmart_dictionary_service.main:app --port 8081 --reload
 ```
 
-Interactive API docs are served at <http://127.0.0.1:8081/docs>, and health checks at <http://127.0.0.1:8081/api/v1/health>.
+- Multi-page HTML portal: <http://127.0.0.1:8081/> (`/register`, `/verify-email`, `/login`, `/keys`, `/chat`)
+- Interactive API docs: <http://127.0.0.1:8081/docs>
+- Health checks: <http://127.0.0.1:8081/api/v1/health>
 
 ## Project layout
 
@@ -49,12 +54,15 @@ gosmart-dictionary-service/
 │       ├── __init__.py                # Package docstring + __version__
 │       ├── __main__.py                # `python -m gosmart_dictionary_service`
 │       ├── main.py                    # FastAPI app factory, lifespan & request logging
-│       ├── core/                      # Settings (`GOSMART_DS_*`) & structlog logging
+│       ├── core/                      # Settings (`GOSMART_DS_*`), security & structlog
 │       ├── db/                        # Neo4j client & Cypher schema loader
-│       └── api/                       # Versioned REST endpoints (`/api/v1`)
+│       ├── api/                       # Versioned REST endpoints (`/api/v1`)
+│       ├── web/                       # Multi-page HTML templates & static assets
+│       └── service/                   # Core business services (User, Email, Chat, LLM, System)
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (TestClient)
-│   └── unit/                          # Unit tests
+│   ├── unit/                          # Unit tests
+│   └── integration/                   # Optional live Neo4j integration tests
 └── docs/
     └── zensical/                      # This documentation site
 ```
@@ -78,5 +86,5 @@ Run from `docs/zensical/`:
 
 ```bash
 uv run --group docs zensical serve                    # live preview
-uv run --group docs zensical build --strict --clean   # production build
+uv run --group docs zensical build --strict --clean   # production build into ./site/
 ```

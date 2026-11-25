@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Verify Email — {{ app_name }}{% endblock %}
+{% block container_class %}container-narrow{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Email Verification</h1>
+
+  {% if verified %}
+    <div class="alert alert-success" role="status">
+      <strong>Email verified!</strong>
+      Your account{% if verified_email %} (<span class="mono">{{ verified_email }}</span>){% endif %} is now active.
+    </div>
+    <div class="btn-row">
+      <a href="/login?verified=1" class="btn btn-primary">Proceed to Log In</a>
+      <a href="/" class="btn btn-secondary">Back to Home</a>
+    </div>
+  {% else %}
+    {% if error %}
+      <div class="alert alert-error" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <p class="muted">
+      Paste your email verification token below, or click the link in your verification email.
+    </p>
+
+    <form method="post" action="/verify-email">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="form-group">
+        <label for="token">Verification Token</label>
+        <input id="token" name="token" type="text" required placeholder="Paste verification token">
+      </div>
+      <div class="btn-row">
+        <button type="submit" class="btn btn-primary">Verify Email</button>
+        <a href="/register" class="btn btn-secondary">Register Again</a>
+      </div>
+    </form>
+  {% endif %}
+</section>
+{% endblock %}

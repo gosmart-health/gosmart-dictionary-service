@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ app_name }} — Terminology Dictionary &amp; Ontology Service{% endblock %}
+
+{% block content %}
+<section class="card hero">
+  <h1>GoSmart Health Dictionary Service</h1>
+  <p class="lead">
+    Clinical terminology and DICOM standard knowledge graph with grounded AI lookup,
+    self-service API keys, and REST/MCP integration.
+  </p>
+  <div class="btn-row">
+    {% if current_user %}
+      <a href="/keys" class="btn btn-primary">Manage API Keys</a>
+      <a href="/chat" class="btn btn-secondary">Open AI Chat</a>
+      <a href="/docs" class="btn btn-secondary">Explore REST API</a>
+    {% else %}
+      <a href="/register" class="btn btn-primary">Create Account</a>
+      <a href="/login" class="btn btn-secondary">Log In</a>
+      <a href="/docs" class="btn btn-secondary">Explore REST API</a>
+    {% endif %}
+  </div>
+</section>
+
+<section class="grid">
+  <div class="card">
+    <h2>1. Register &amp; Verify</h2>
+    <p class="muted">
+      Create an account with your email and password. Confirm your email address via our
+      transactional verification link to activate access.
+    </p>
+    <a href="/register">Go to Registration &rarr;</a>
+  </div>
+
+  <div class="card">
+    <h2>2. Generate API Keys</h2>
+    <p class="muted">
+      Issue scoped <code class="mono">X-API-Key</code> credentials (<code class="mono">gs_dict_...</code>)
+      for REST API calls, scripts, and MCP tools, and revoke them anytime.
+    </p>
+    <a href="/keys">Manage API Keys &rarr;</a>
+  </div>
+
+  <div class="card">
+    <h2>3. Grounded AI Chat</h2>
+    <p class="muted">
+      Query the DICOM standard knowledge graph in natural language with Genkit inference
+      grounded directly in Neo4j dictionary entries.
+    </p>
+    <a href="/chat">Open AI Chat &rarr;</a>
+  </div>
+</section>
+{% endblock %}

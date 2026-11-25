@@ -19,6 +19,11 @@ CREATE CONSTRAINT audit_log_sys_id_unique IF NOT EXISTS FOR (a:AuditLog) REQUIRE
 // 2. Lookup & Test Isolation Property Indexes
 // -----------------------------------------------------------------------------
 CREATE INDEX system_test_id_idx IF NOT EXISTS FOR (sys:System) ON (sys.test_id);
+CREATE INDEX user_test_id_idx IF NOT EXISTS FOR (u:User) ON (u.test_id);
+CREATE INDEX user_verification_token_hash_idx IF NOT EXISTS FOR (u:User) ON (u.verification_token_hash);
+CREATE INDEX identity_test_id_idx IF NOT EXISTS FOR (i:Identity) ON (i.test_id);
+CREATE INDEX authenticator_secret_hash_idx IF NOT EXISTS FOR (a:Authenticator) ON (a.secret_hash);
+CREATE INDEX authenticator_test_id_idx IF NOT EXISTS FOR (a:Authenticator) ON (a.test_id);
 CREATE INDEX group_name_idx IF NOT EXISTS FOR (g:Group) ON (g.name);
 CREATE INDEX group_test_id_idx IF NOT EXISTS FOR (g:Group) ON (g.test_id);
 CREATE INDEX llm_config_tag_idx IF NOT EXISTS FOR (l:LLM_Config) ON (l.tag);

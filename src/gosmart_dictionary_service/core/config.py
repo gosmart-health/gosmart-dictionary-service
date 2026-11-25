@@ -199,10 +199,45 @@ class Settings(BaseSettings):
         default=30, description="Refresh token expiration time in days (default: 30)"
     )
     API_KEY_PREFIX: str = Field(default="gs_dict_", description="Standard prefix for generated API keys")
+    SESSION_COOKIE_NAME: str = Field(
+        default="gosmart_ds_session",
+        description="HttpOnly browser session cookie name for the web portal",
+    )
+    SESSION_COOKIE_SECURE: bool = Field(
+        default=False,
+        description="Mark session cookies as Secure (set true when served over HTTPS / Cloudflare)",
+    )
     GOOGLE_OAUTH_CLIENT_ID: Optional[str] = Field(
         default=None, description="Google OAuth2 / OIDC Client ID for federated authentication"
     )
     GOOGLE_OAUTH_CLIENT_SECRET: Optional[SecretStr] = Field(default=None, description="Google OAuth2 Client Secret")
+
+    # Brevo Transactional Email & Self-Service Registration Settings
+    BREVO_API_KEY: Optional[SecretStr] = Field(
+        default=None,
+        description="Brevo transactional email API key (sent via api-key header); optional in DEV_MODE",
+    )
+    BREVO_API_URL: str = Field(
+        default="https://api.brevo.com/v3/smtp/email",
+        description="Brevo transactional email API endpoint URL",
+    )
+    BREVO_SENDER_EMAIL: str = Field(
+        default="no-reply@gosmart.health",
+        description="Verified sender email address used for Brevo transactional emails",
+    )
+    BREVO_SENDER_NAME: str = Field(
+        default="GoSmart Health Dictionary Service",
+        description="Sender display name used for Brevo transactional emails",
+    )
+    PUBLIC_BASE_URL: str = Field(
+        default="http://127.0.0.1:8081",
+        description="Public base URL used to construct email verification links",
+    )
+    EMAIL_VERIFICATION_EXPIRE_HOURS: int = Field(
+        default=24,
+        gt=0,
+        description="Hours before an account email verification token expires (default: 24)",
+    )
 
     # Initial Platform Admin Bootstrapping & Recovery
     INITIAL_ADMIN_EMAIL: Optional[str] = Field(

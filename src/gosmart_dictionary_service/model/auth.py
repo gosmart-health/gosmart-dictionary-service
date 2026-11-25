@@ -1,13 +1,25 @@
-"""Graph entity models for users, identities, authenticators, and organizational groups."""
+"""Graph entity models and API schemas for users, identities, authenticators, and groups."""
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, ClassVar, Dict, List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from gosmart_dictionary_service.model.auditable import AuditableNode, AuditableRelation
+
+_BASIC_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email_format(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Email must be a string.")
+    normalized = value.strip().lower()
+    if not _BASIC_EMAIL_RE.match(normalized):
+        raise ValueError("Please provide a valid email address.")
+    return normalized
 
 
 class UserNode(AuditableNode):
@@ -21,6 +33,26 @@ class UserNode(AuditableNode):
     is_shadow: bool = Field(
         default=False,
         description="Whether this is a shadow account provisioned automatically via OAuth without local password",
+    )
+    email_verified: bool = Field(
+        default=False,
+        description="Whether the registrant's email address has been verified via Brevo confirmation link",
+    )
+    verification_token_hash: Optional[str] = Field(
+        default=None,
+        description="SHA-256 hex digest of active email verification token (raw token is never stored)",
+    )
+    verification_expires_at: Optional[datetime] = Field(
+        default=None,
+        description="UTC expiration timestamp for the active email verification token",
+    )
+    terms_accepted_at: Optional[datetime] = Field(
+        default=None,
+        description="UTC timestamp when registrant accepted terminology terms of use",
+    )
+    tier: str = Field(
+        default="PUBLIC",
+        description="Access tier: PUBLIC | INTERNAL_SERVICE | ADMIN",
     )
     system_roles: List[str] = Field(
         default_factory=lambda: ["USER"],
@@ -84,11 +116,12 @@ class AuthenticatorNode(AuditableNode):
         description="Type of authenticator: 'password', 'api_key', 'passkey', 'totp'",
     )
     secret_hash: str = Field(..., description="Argon2 hash for password or SHA-256 hash for API key")
-    prefix: Optional[str] = Field(default=None, description="Key prefix (e.g. 'gs_dict_') for fast lookup")
+    prefix: Optional[str] = Field(default=None, description="Visible key prefix (e.g. 'gs_dict_a1b2c3d4')")
     name: Optional[str] = Field(default=None, description="Human-readable label (e.g. 'MacBook Pro CLI', 'MCP Agent')")
     scopes: List[str] = Field(default_factory=lambda: ["*"], description="Authorized permission scopes")
     expires_at: Optional[datetime] = Field(default=None, description="Credential expiration timestamp")
     last_used_at: Optional[datetime] = Field(default=None, description="Timestamp of last successful authentication")
+    is_revoked: bool = Field(default=False, description="Whether the credential has been soft-revoked")
 
     def get_identity_subset(self) -> Dict[str, Any]:
         subset: Dict[str, Any] = {
@@ -185,6 +218,116 @@ class BelongsToRelation(AuditableRelation):
     __type__: ClassVar[str] = "BELONGS_TO"
 
 
+# ---------------------------------------------------------------------------
+# REST API Request / Response Schemas for Auth & API Key Management
+# ---------------------------------------------------------------------------
+
+
+class RegisterRequest(BaseModel):
+    """Payload for self-service registrant signup."""
+
+    email: str = Field(..., description="Registrant email address")
+    password: str = Field(..., min_length=8, max_length=128, description="Account password (minimum 8 characters)")
+    display_name: Optional[str] = Field(default=None, max_length=120, description="Optional full display name")
+    terms_accepted: bool = Field(default=False, description="Must be true to accept terminology terms of use")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _validate_email_format(v)
+
+
+class RegisterResponse(BaseModel):
+    """Response returned after successful registration."""
+
+    user_id: str
+    email: str
+    display_name: str
+    email_verified: bool
+    verification_delivery_mode: str = Field(
+        description="Email delivery mode: 'brevo' or 'dev_local'",
+    )
+    message: str
+    dev_verification_url: Optional[str] = Field(
+        default=None,
+        description="Populated ONLY in DEV_MODE when GOSMART_DS_BREVO_API_KEY is unset",
+    )
+
+
+class VerifyEmailRequest(BaseModel):
+    """Payload for confirming a registrant email verification token."""
+
+    token: str = Field(..., min_length=8, description="Raw email verification token")
+
+
+class VerifyEmailResponse(BaseModel):
+    """Response returned after email verification."""
+
+    verified: bool
+    email: str
+    message: str
+
+
+class LoginRequest(BaseModel):
+    """Payload for email/username + password authentication."""
+
+    email: str = Field(..., description="Registered email address or username")
+    password: str = Field(..., min_length=1, description="Account password")
+
+
+class UserProfileResponse(BaseModel):
+    """Public profile of an authenticated user."""
+
+    id: str
+    email: str
+    display_name: str
+    email_verified: bool
+    is_active: bool
+    tier: str = "PUBLIC"
+    system_roles: List[str] = Field(default_factory=lambda: ["USER"])
+
+
+class TokenResponse(BaseModel):
+    """JWT access token response returned on login."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in_minutes: int
+    user: UserProfileResponse
+
+
+class ApiKeyCreateRequest(BaseModel):
+    """Payload to issue a new X-API-Key credential."""
+
+    name: str = Field(..., min_length=1, max_length=80, description="Human-readable label for the API key")
+    expires_in_days: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=3650,
+        description="Optional expiration window in days (null = non-expiring)",
+    )
+    scopes: Optional[List[str]] = Field(default=None, description="Optional permission scopes (default: ['*'])")
+
+
+class ApiKeySummary(BaseModel):
+    """Non-secret metadata for an issued API key."""
+
+    id: str
+    name: str
+    prefix: str
+    scopes: List[str] = Field(default_factory=lambda: ["*"])
+    created_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    is_revoked: bool = False
+
+
+class ApiKeyCreateResponse(ApiKeySummary):
+    """Response returned once upon API key creation, including the plaintext key."""
+
+    raw_api_key: str = Field(..., description="Plaintext API key (displayed once; store securely)")
+
+
 __all__ = [
     "UserNode",
     "IdentityNode",
@@ -196,4 +339,14 @@ __all__ = [
     "HasAuthenticatorRelation",
     "MemberOfRelation",
     "BelongsToRelation",
+    "RegisterRequest",
+    "RegisterResponse",
+    "VerifyEmailRequest",
+    "VerifyEmailResponse",
+    "LoginRequest",
+    "UserProfileResponse",
+    "TokenResponse",
+    "ApiKeyCreateRequest",
+    "ApiKeySummary",
+    "ApiKeyCreateResponse",
 ]

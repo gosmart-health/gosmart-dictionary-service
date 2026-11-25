@@ -9,6 +9,7 @@ from typing import AsyncGenerator
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from gosmart_dictionary_service.api.v1.router import api_v1_router
 from gosmart_dictionary_service.core.config import get_settings
@@ -16,6 +17,7 @@ from gosmart_dictionary_service.core.logging import bind_log_context, clear_log_
 from gosmart_dictionary_service.db.neo4j import neo4j_client
 from gosmart_dictionary_service.db.schema_loader import SchemaInitializationError, apply_schema_async
 from gosmart_dictionary_service.service.system_service import system_service
+from gosmart_dictionary_service.web import STATIC_DIR, web_router
 
 logger = get_logger("gosmart_ds.server")
 
@@ -154,18 +156,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Mount API routes
+    # Mount static assets for the multi-page HTML portal
+    fastapi_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    # Mount REST API routes
     fastapi_app.include_router(api_v1_router, prefix=settings.API_V1_PREFIX)
 
-    @fastapi_app.get("/", tags=["Root"])
-    async def root():
-        return {
-            "name": settings.APP_NAME,
-            "version": settings.APP_VERSION,
-            "docs_url": "/docs",
-            "api_v1": settings.API_V1_PREFIX,
-            "db_connection": settings.DB_CONNECTION_URI,
-        }
+    # Mount multi-page HTML web portal routes (/, /register, /verify-email, /login, /logout, /keys, /chat)
+    fastapi_app.include_router(web_router)
 
     return fastapi_app
 

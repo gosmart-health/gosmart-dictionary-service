@@ -35,19 +35,49 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+def hash_token(raw_token: str) -> str:
+    """Compute a deterministic SHA-256 hex digest of an opaque token or API key."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
 def hash_api_key(raw_api_key: str) -> str:
     """Compute a deterministic SHA-256 hex digest of a raw API key."""
-    return hashlib.sha256(raw_api_key.encode("utf-8")).hexdigest()
+    return hash_token(raw_api_key)
+
+
+def generate_verification_token() -> Tuple[str, str]:
+    """Generate a URL-safe email verification token, returning ``(raw_token, sha256_hash)``."""
+    raw_token = secrets.token_urlsafe(32)
+    return raw_token, hash_token(raw_token)
+
+
+def generate_csrf_token() -> str:
+    """Generate a random URL-safe CSRF token for HTML form protection."""
+    return secrets.token_urlsafe(32)
+
+
+def verify_csrf_token(expected_token: Optional[str], provided_token: Optional[str]) -> bool:
+    """Verify a submitted CSRF token against the cookie value using constant-time comparison."""
+    if not expected_token or not provided_token:
+        return False
+    return hmac.compare_digest(expected_token.strip(), provided_token.strip())
 
 
 def generate_api_key(prefix: Optional[str] = None) -> Tuple[str, str, str]:
-    """Generate a secure, random API key with prefix, returning (raw_key, prefix, sha256_hash)."""
+    """Generate a secure, random API key with visible identifier prefix.
+
+    Returns ``(raw_key, visible_prefix, sha256_hash)`` where:
+    - ``raw_key`` has the form ``gs_dict_<8hex>_<secret>``
+    - ``visible_prefix`` has the form ``gs_dict_<8hex>`` for non-secret UI display
+    """
     settings = get_settings()
-    key_prefix = prefix or settings.API_KEY_PREFIX
-    random_bytes = secrets.token_urlsafe(32)
-    raw_key = f"{key_prefix}{random_bytes}"
+    base_prefix = prefix or settings.API_KEY_PREFIX
+    key_id_part = secrets.token_hex(4)
+    visible_prefix = f"{base_prefix}{key_id_part}"
+    secret_part = secrets.token_urlsafe(32)
+    raw_key = f"{visible_prefix}_{secret_part}"
     key_hash = hash_api_key(raw_key)
-    return raw_key, key_prefix, key_hash
+    return raw_key, visible_prefix, key_hash
 
 
 def verify_api_key(raw_api_key: str, stored_hash: str) -> bool:
