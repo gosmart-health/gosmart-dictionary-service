@@ -1,5 +1,12 @@
 """Dictionary data ingestion pipelines for GoSmart DS."""
 
+from gosmart_dictionary_service.ingestor.clinical_terms_ingestor import (
+    ClinicalTermsIngesterService,
+    ClinicalTermsIngestionOptions,
+    ClinicalTermsIngestionReport,
+    build_concept_embedding_items,
+    clinical_terms_ingester_service,
+)
 from gosmart_dictionary_service.ingestor.dicom_ingestor import (
     DicomIngesterService,
     DicomIngestionOptions,
@@ -18,4 +25,9 @@ __all__ = [
     "extract_dicom_embedding_items",
     "DicomIngesterService",
     "dicom_ingester_service",
+    "ClinicalTermsIngestionOptions",
+    "ClinicalTermsIngestionReport",
+    "build_concept_embedding_items",
+    "ClinicalTermsIngesterService",
+    "clinical_terms_ingester_service",
 ]

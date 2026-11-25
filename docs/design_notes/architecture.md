@@ -346,7 +346,7 @@ Text embeddings capture surface/semantic similarity in prose, whereas GNN struct
 
 All ingestors implement a common streaming/chunked pipeline: **Validate Source → Normalize to Pydantic Models → Deterministic UUIDv5 Assignment → Batched `UNWIND` Cypher `MERGE` → Incremental `:Embedding` Enqueue**.
 
-1. **Primary Clinical Ingestor — OHDSI Athena Bundle Loader (`athena_ingestor.py`)**
+1. **Primary Clinical Ingestor — OHDSI Athena Bundle Loader (`clinical_terms_ingestor.py`)**
    - Serves as the **primary unified source** for clinical terminologies and ontologies (**SNOMED CT**, **LOINC**, **ICD-10**, **ICD-10-CM**, and **ICD-11** where included in the Athena bundle).
    - Streams standardized OMOP vocabulary CSVs (`VOCABULARY.csv`, `DOMAIN.csv`, `CONCEPT_CLASS.csv`, `CONCEPT.csv`, `CONCEPT_SYNONYM.csv`, `CONCEPT_RELATIONSHIP.csv`) in bounded chunks, materializing `:CodeSystem`, `:Concept`, `:IS_A` hierarchies, `:HAS_ATTRIBUTE` defining edges, and `:MAPS_TO` cross-vocabulary equivalences in one consistent schema.
 2. **Primary Imaging Ingestor — DICOM Dictionary Ingestor (`dicom_ingestor.py`)**
@@ -408,7 +408,7 @@ Exposed over `StreamableHTTP` and `SSE` (authenticated via `X-API-Key` header) a
 ### 5.4 CLI (`gosmart-dictionary-service` / `gosmart-ds`)
 
 - `gosmart-ds serve` — Launch the FastAPI + MCP server.
-- `gosmart-ds ingest <source>` — Run idempotent ingestion pipelines (`athena`, `dicom`, and optional `icd11` / supplements) from local directories or configured URIs.
+- `gosmart-ds ingest-dicom` / `gosmart-ds ingest-clinical-terms` — Run idempotent Pykka actor ingestion pipelines (`--profile full|valid|demo-core`, `--dry-run`, `--bootstrap`, `--compute-embeddings`) from local source directories.
 - `gosmart-ds embed` — Trigger or resume incremental text `:Embedding` generation across unembedded `:Concept` and `:DicomElement` nodes for a specified `:LLM_Config` tag.
 - `gosmart-ds train-gnn` *(optional `train` group)* — Export ontology topology + text features, train GraphSAGE / R-GCN on local MPS/CUDA, and write structural `:Embedding` nodes back to Neo4j.
 - `gosmart-ds apikey <issue|revoke|list>` — Admin CLI to provision, inspect, or revoke `X-API-Key` credentials (including `INTERNAL_SERVICE` keys for `gosmart-graphite`).

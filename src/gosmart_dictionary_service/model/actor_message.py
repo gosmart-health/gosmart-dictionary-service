@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from gosmart_dictionary_service.model.clinical.constants import ClinicalIngestionProfile
 from gosmart_dictionary_service.model.embedding import DictionaryEmbeddingFieldTag
 from gosmart_dictionary_service.model.llm_config import DEFAULT_EMBEDDING_CONFIG_TAG
 
@@ -19,6 +20,8 @@ ALLOWED_EMBEDDING_TARGET_LABELS: frozenset[str] = frozenset(
         "DicomSOPClass",
         "DicomConfidentialityProfile",
         "DicomStandardReference",
+        "CodeSystem",
+        "Concept",
     }
 )
 
@@ -30,7 +33,7 @@ class EmbeddingItem(BaseModel):
     target_label: str = Field(..., min_length=1, description="Allowlisted Neo4j label of the target node")
     target_field_tag: str = Field(
         default=DictionaryEmbeddingFieldTag.NAME.value,
-        description="Aspect/field tag represented by this embedding (e.g. 'NAME', 'DESCRIPTION')",
+        description="Aspect/field tag represented by this embedding (e.g. 'NAME', 'DESCRIPTION', 'DISPLAY', 'SYNONYM')",
     )
     text: str = Field(..., min_length=1, description="Source text to embed")
 
@@ -211,10 +214,174 @@ class DicomCleanupMessage(BaseModel):
         return v.strip()
 
 
+class ClinicalTermsIngestMessage(BaseModel):
+    """Validated message payload for ``ClinicalTermsIngestionActor`` ingestion requests."""
+
+    type: Literal["INGEST_CLINICAL_TERMS"] = Field(
+        default="INGEST_CLINICAL_TERMS",
+        description="Actor message discriminator",
+    )
+    source_dir: str = Field(
+        default="./data-source/clinical-terms",
+        min_length=1,
+        description="Directory containing OHDSI Athena tab-delimited CSV files",
+    )
+    profile: ClinicalIngestionProfile = Field(
+        default=ClinicalIngestionProfile.FULL,
+        description="Preset ingestion scope ('full', 'valid', or 'demo-core')",
+    )
+    vocabularies: Optional[List[str]] = Field(
+        default=None,
+        description="Optional explicit vocabulary_id allowlist override",
+    )
+    all_vocabularies: bool = Field(
+        default=False,
+        description="Ingest all vocabularies present in the Athena export (overrides default clinical allowlist)",
+    )
+    domains: Optional[List[str]] = Field(
+        default=None,
+        description="Optional explicit domain_id filter override",
+    )
+    include_deprecated: Optional[bool] = Field(
+        default=None,
+        description="Override whether deprecated/upgraded ('D'/'U') concepts are included",
+    )
+    include_synonyms: bool = Field(default=True, description="Attach synonyms from CONCEPT_SYNONYM.csv")
+    synonym_language_ids: Optional[List[int]] = Field(
+        default=None,
+        description="Optional language_concept_id filter for synonyms (default: English 4180186)",
+    )
+    all_synonym_languages: bool = Field(
+        default=False,
+        description="Include synonyms across all languages",
+    )
+    max_synonyms_per_concept: int = Field(
+        default=25,
+        gt=0,
+        description="Maximum deduplicated synonyms stored per Concept node",
+    )
+    include_relationships: bool = Field(
+        default=True,
+        description="Ingest canonical ontology relationships from CONCEPT_RELATIONSHIP.csv",
+    )
+    include_attribute_edges: bool = Field(
+        default=True,
+        description="Ingest :HAS_ATTRIBUTE clinical defining edges",
+    )
+    include_rf2_metadata_edges: bool = Field(
+        default=False,
+        description="Include SNOMED RF2 administrative edges ('Has status', 'Has Module')",
+    )
+    include_replaced_by_edges: bool = Field(
+        default=True,
+        description="Include historical replacement edges (:REPLACED_BY)",
+    )
+    max_concepts: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Optional cap on ingested Concept nodes (useful for dev/smoke runs)",
+    )
+    batch_size: int = Field(default=5000, gt=0, description="Rows per Neo4j UNWIND MERGE write transaction")
+    acted_by: str = Field(default="clinical_terms_ingestor", description="Audit actor identifier")
+    test_id: Optional[str] = Field(default=None, description="Optional test isolation identifier")
+    ensure_schema: bool = Field(default=True, description="Apply Neo4j DDL schema before ingesting")
+    bootstrap_system: bool = Field(
+        default=False,
+        description="Bootstrap System + GoSmart Health Group + default LLM_Config before ingesting",
+    )
+    compute_embeddings: bool = Field(
+        default=False,
+        description="Compute and persist :Embedding nodes for ingested :Concept nodes",
+    )
+    embed_standard_only: bool = Field(
+        default=True,
+        description="Restrict automatic embeddings to valid Standard ('S') or Classification ('C') concepts",
+    )
+    embed_synonyms: bool = Field(
+        default=False,
+        description="Also generate separate :Embedding nodes for concept synonyms",
+    )
+    embedding_tag: str = Field(
+        default=DEFAULT_EMBEDDING_CONFIG_TAG,
+        description="LLM_Config tag used for embedding computation",
+    )
+    embedding_group_code: Optional[str] = Field(
+        default=None,
+        description="Optional Group code override for resolving embedding LLM_Config",
+    )
+    embedding_group_name: Optional[str] = Field(
+        default="GoSmart Health",
+        description="Sponsoring Group name for resolving embedding LLM_Config",
+    )
+    embedding_batch_size: int = Field(default=64, gt=0, description="Texts per embedding provider batch")
+    embedding_dispatch_chunk_size: int = Field(
+        default=1000,
+        gt=0,
+        description="Maximum EmbeddingItem entries dispatched per chunk to EmbeddingActor",
+    )
+    skip_existing_embeddings: bool = Field(
+        default=True,
+        description="Skip re-embedding nodes whose text has not changed",
+    )
+    use_contextual_embedding_text: bool = Field(
+        default=True,
+        description="Prefix embedding text with vocabulary/domain/code context",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Stream and validate CSV files and return counts without writing to Neo4j or calling LLMs",
+    )
+
+    @field_validator("source_dir", mode="before")
+    @classmethod
+    def _validate_source_dir(cls, v: Any) -> str:
+        if isinstance(v, Path):
+            v = str(v)
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("source_dir must be a non-empty path string.")
+        return v.strip()
+
+    @field_validator("test_id", "embedding_group_code", "embedding_group_name", mode="before")
+    @classmethod
+    def _normalize_optional_str(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            stripped = v.strip()
+            return stripped if stripped else None
+        return str(v).strip() or None
+
+    @field_validator("acted_by", mode="before")
+    @classmethod
+    def _normalize_acted_by(cls, v: Any) -> str:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return "clinical_terms_ingestor"
+        return str(v).strip()
+
+
+class ClinicalTermsCleanupMessage(BaseModel):
+    """Validated message payload for ``ClinicalTermsIngestionActor`` test-scoped cleanup."""
+
+    type: Literal["CLEANUP_TEST_DATA"] = Field(
+        default="CLEANUP_TEST_DATA",
+        description="Actor message discriminator",
+    )
+    test_id: str = Field(..., min_length=1, description="Mandatory non-empty test identifier to purge")
+
+    @field_validator("test_id", mode="before")
+    @classmethod
+    def _validate_test_id(cls, v: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("test_id must be a non-empty string.")
+        return v.strip()
+
+
 __all__ = [
     "ALLOWED_EMBEDDING_TARGET_LABELS",
     "EmbeddingItem",
     "EmbeddingBatchMessage",
     "DicomIngestMessage",
     "DicomCleanupMessage",
+    "ClinicalTermsIngestMessage",
+    "ClinicalTermsCleanupMessage",
 ]

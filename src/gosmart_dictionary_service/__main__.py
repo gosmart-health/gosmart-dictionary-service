@@ -6,17 +6,33 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from typing import Optional
+from typing import List, Optional
 
+from gosmart_dictionary_service.actor.clinical_terms_ingestion_actor import ClinicalTermsIngestionActor
 from gosmart_dictionary_service.actor.dicom_ingestion_actor import DicomIngestionActor
 from gosmart_dictionary_service.actor.embedding_actor import EmbeddingActor
 from gosmart_dictionary_service.core.logging import setup_logging
 from gosmart_dictionary_service.db.neo4j import neo4j_client
 from gosmart_dictionary_service.main import run
-from gosmart_dictionary_service.model.actor_message import DicomIngestMessage
+from gosmart_dictionary_service.model.actor_message import ClinicalTermsIngestMessage, DicomIngestMessage
+from gosmart_dictionary_service.model.clinical.constants import ClinicalIngestionProfile
 from gosmart_dictionary_service.model.llm_config import DEFAULT_EMBEDDING_CONFIG_TAG
 from gosmart_dictionary_service.model.result import STATUS_OK
 from gosmart_dictionary_service.service.system_service import system_service
+
+
+def _parse_csv_list(raw: Optional[str]) -> Optional[List[str]]:
+    if not raw or not raw.strip():
+        return None
+    items = [part.strip() for part in raw.split(",") if part.strip()]
+    return items if items else None
+
+
+def _parse_int_csv_list(raw: Optional[str]) -> Optional[List[int]]:
+    str_items = _parse_csv_list(raw)
+    if str_items is None:
+        return None
+    return [int(item) for item in str_items]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -95,6 +111,143 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Validate seed files and report counts without writing to Neo4j or calling LLMs",
     )
 
+    # ingest-clinical-terms
+    clinical_parser = subparsers.add_parser(
+        "ingest-clinical-terms",
+        help="Stream and ingest OHDSI Athena clinical terminology CSVs into Neo4j via Pykka actors",
+    )
+    clinical_parser.add_argument(
+        "--source-dir",
+        default="./data-source/clinical-terms",
+        help="Path to directory containing OHDSI Athena CSV files (default: ./data-source/clinical-terms)",
+    )
+    clinical_parser.add_argument(
+        "--profile",
+        choices=[p.value for p in ClinicalIngestionProfile],
+        default=ClinicalIngestionProfile.FULL.value,
+        help="Preset scope: 'full' (~1.50M), 'valid' (~765k), or 'demo-core' (~455k for 8 GB Linux demo)",
+    )
+    clinical_parser.add_argument(
+        "--vocabularies",
+        default=None,
+        help="Comma-separated vocabulary_id allowlist (default: SNOMED,LOINC,ICD10CM,UCUM)",
+    )
+    clinical_parser.add_argument(
+        "--all-vocabularies",
+        action="store_true",
+        help="Ingest all vocabularies in the Athena export (including OSM/OMOP metadata)",
+    )
+    clinical_parser.add_argument(
+        "--domains",
+        default=None,
+        help="Comma-separated domain_id filter (e.g. 'Condition,Measurement,Procedure,Spec Anatomic Site,Unit')",
+    )
+    dep_group = clinical_parser.add_mutually_exclusive_group()
+    dep_group.add_argument(
+        "--exclude-deprecated",
+        action="store_true",
+        help="Exclude deprecated/upgraded ('D'/'U') concepts",
+    )
+    dep_group.add_argument(
+        "--include-deprecated",
+        action="store_true",
+        help="Include deprecated/upgraded ('D'/'U') concepts (overrides 'valid'/'demo-core' profile defaults)",
+    )
+    clinical_parser.add_argument("--no-synonyms", action="store_true", help="Skip attaching CONCEPT_SYNONYM.csv")
+    clinical_parser.add_argument(
+        "--languages",
+        default=None,
+        help="Comma-separated Athena language_concept_ids for synonyms (default: 4180186 for English)",
+    )
+    clinical_parser.add_argument(
+        "--all-languages",
+        action="store_true",
+        help="Include synonyms across all languages",
+    )
+    clinical_parser.add_argument(
+        "--max-synonyms",
+        type=int,
+        default=25,
+        help="Maximum deduplicated synonyms stored per Concept node (default: 25)",
+    )
+    clinical_parser.add_argument(
+        "--no-relationships",
+        action="store_true",
+        help="Skip ingesting CONCEPT_RELATIONSHIP.csv ontology edges",
+    )
+    clinical_parser.add_argument(
+        "--no-attribute-edges",
+        action="store_true",
+        help="Skip :HAS_ATTRIBUTE defining relationship edges (keep :IS_A, :MAPS_TO, :REPLACED_BY)",
+    )
+    clinical_parser.add_argument(
+        "--include-rf2-metadata-edges",
+        action="store_true",
+        help="Include SNOMED RF2 administrative edges ('Has status', 'Has Module')",
+    )
+    clinical_parser.add_argument(
+        "--no-replaced-by-edges",
+        action="store_true",
+        help="Skip historical :REPLACED_BY replacement edges",
+    )
+    clinical_parser.add_argument(
+        "--max-concepts",
+        type=int,
+        default=None,
+        help="Optional cap on ingested Concept nodes (useful for dev/smoke testing)",
+    )
+    clinical_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=5000,
+        help="Neo4j UNWIND MERGE batch size (default: 5000)",
+    )
+    clinical_parser.add_argument("--acted-by", default="cli_clinical_terms_ingestor", help="Audit actor identifier")
+    clinical_parser.add_argument("--test-id", default=None, help="Optional test_id for isolated test runs")
+    clinical_parser.add_argument("--bootstrap", action="store_true", help="Bootstrap System/Group/LLM_Config first")
+    clinical_parser.add_argument("--no-schema", action="store_true", help="Skip applying Neo4j DDL schema first")
+    clinical_parser.add_argument(
+        "--compute-embeddings",
+        action="store_true",
+        help="Compute and persist :Embedding nodes for ingested :Concept nodes (opt-in; slow on full dataset)",
+    )
+    clinical_parser.add_argument(
+        "--embed-all-concepts",
+        action="store_true",
+        help="Embed non-standard and deprecated concepts too (default restricts to valid Standard/Classification)",
+    )
+    clinical_parser.add_argument(
+        "--embed-synonyms",
+        action="store_true",
+        help="Also generate separate :Embedding nodes for concept synonyms",
+    )
+    clinical_parser.add_argument(
+        "--embedding-tag",
+        default=DEFAULT_EMBEDDING_CONFIG_TAG,
+        help=f"LLM_Config tag for embeddings (default: {DEFAULT_EMBEDDING_CONFIG_TAG})",
+    )
+    clinical_parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=64,
+        help="Texts per embedding provider batch (default: 64)",
+    )
+    clinical_parser.add_argument(
+        "--no-skip-existing-embeddings",
+        action="store_true",
+        help="Recompute embeddings even when existing :Embedding text is unchanged",
+    )
+    clinical_parser.add_argument(
+        "--raw-embedding-text",
+        action="store_true",
+        help="Embed raw concept display text without vocabulary/domain/code context prefix",
+    )
+    clinical_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Stream and validate Athena CSVs and report counts without writing to Neo4j or calling LLMs",
+    )
+
     return parser
 
 
@@ -138,6 +291,60 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 include_references=not args.no_references,
                 include_reference_edges=not args.no_reference_edges,
                 compute_embeddings=args.compute_embeddings,
+                embedding_tag=args.embedding_tag,
+                embedding_batch_size=args.embedding_batch_size,
+                skip_existing_embeddings=not args.no_skip_existing_embeddings,
+                use_contextual_embedding_text=not args.raw_embedding_text,
+                dry_run=args.dry_run,
+            )
+            res = ingestion_actor.ask(msg)
+            if res.status != STATUS_OK or res.value is None:
+                print(json.dumps(res.model_dump(), indent=2, default=str), file=sys.stderr)
+                return 1
+            print(res.value.model_dump_json(indent=2))
+            return 0
+        finally:
+            ingestion_actor.stop()
+            if embedding_actor is not None:
+                embedding_actor.stop()
+            if neo4j_client._sync_driver is not None:
+                neo4j_client._sync_driver.close()
+                neo4j_client._sync_driver = None
+
+    if args.command == "ingest-clinical-terms":
+        include_deprecated: Optional[bool] = None
+        if args.exclude_deprecated:
+            include_deprecated = False
+        elif args.include_deprecated:
+            include_deprecated = True
+
+        embedding_actor = EmbeddingActor.start() if args.compute_embeddings else None
+        ingestion_actor = ClinicalTermsIngestionActor.start(embedding_actor_ref=embedding_actor)
+        try:
+            msg = ClinicalTermsIngestMessage(
+                source_dir=args.source_dir,
+                profile=ClinicalIngestionProfile(args.profile),
+                vocabularies=_parse_csv_list(args.vocabularies),
+                all_vocabularies=args.all_vocabularies,
+                domains=_parse_csv_list(args.domains),
+                include_deprecated=include_deprecated,
+                include_synonyms=not args.no_synonyms,
+                synonym_language_ids=_parse_int_csv_list(args.languages),
+                all_synonym_languages=args.all_languages,
+                max_synonyms_per_concept=args.max_synonyms,
+                include_relationships=not args.no_relationships,
+                include_attribute_edges=not args.no_attribute_edges,
+                include_rf2_metadata_edges=args.include_rf2_metadata_edges,
+                include_replaced_by_edges=not args.no_replaced_by_edges,
+                max_concepts=args.max_concepts,
+                batch_size=args.batch_size,
+                acted_by=args.acted_by,
+                test_id=args.test_id,
+                ensure_schema=not args.no_schema,
+                bootstrap_system=args.bootstrap,
+                compute_embeddings=args.compute_embeddings,
+                embed_standard_only=not args.embed_all_concepts,
+                embed_synonyms=args.embed_synonyms,
                 embedding_tag=args.embedding_tag,
                 embedding_batch_size=args.embedding_batch_size,
                 skip_existing_embeddings=not args.no_skip_existing_embeddings,

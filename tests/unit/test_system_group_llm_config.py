@@ -254,6 +254,7 @@ def test_schema_loader_parses_all_allowlisted_scripts_and_executes() -> None:
         "system_schema.cypher",
         "embedding_schema.cypher",
         "dicom_schema.cypher",
+        "clinical_schema.cypher",
     )
     statements = load_schema_statements()
     sources = {stmt.source_file for stmt in statements}
@@ -267,6 +268,9 @@ def test_schema_loader_parses_all_allowlisted_scripts_and_executes() -> None:
     assert "dicom_element_id_unique" in joined
     assert "dicom_element_fulltext_idx" in joined
     assert "dicom_structure_fulltext_idx" in joined
+    assert "code_system_id_unique" in joined
+    assert "concept_id_unique" in joined
+    assert "concept_fulltext_idx" in joined
 
     # Async execution path
     mock_client = MagicMock()

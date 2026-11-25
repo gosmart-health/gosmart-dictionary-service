@@ -1,0 +1,180 @@
+"""Pykka ThreadingActor orchestrating OHDSI Athena clinical terms ingestion and embedding dispatch."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+import pykka
+from pydantic import ValidationError
+
+from gosmart_dictionary_service.core.logging import get_logger
+from gosmart_dictionary_service.ingestor.clinical_terms_ingestor import (
+    ClinicalTermsIngesterService,
+    ClinicalTermsIngestionOptions,
+    ClinicalTermsIngestionReport,
+    clinical_terms_ingester_service,
+)
+from gosmart_dictionary_service.model.actor_message import (
+    ClinicalTermsCleanupMessage,
+    ClinicalTermsIngestMessage,
+    EmbeddingBatchMessage,
+    EmbeddingItem,
+)
+from gosmart_dictionary_service.model.result import (
+    STATUS_BAD_REQUEST,
+    STATUS_INTERNAL_ERROR,
+    STATUS_OK,
+    Result,
+)
+from gosmart_dictionary_service.service.embedding_service import EmbeddingBatchReport
+
+logger = get_logger("gosmart_ds.actor.clinical_terms_ingestion")
+
+
+class ClinicalTermsIngestionActor(pykka.ThreadingActor):
+    """Background worker actor running Athena CSV streaming ingestion and optional embedding dispatch."""
+
+    def __init__(
+        self,
+        ingester: Optional[ClinicalTermsIngesterService] = None,
+        embedding_actor_ref: Optional[pykka.ActorRef] = None,
+    ) -> None:
+        super().__init__()
+        self._ingester = ingester or clinical_terms_ingester_service
+        self._embedding_actor_ref = embedding_actor_ref
+
+    def _dispatch_embeddings_to_actor(
+        self,
+        items: List[EmbeddingItem],
+        options: ClinicalTermsIngestionOptions,
+    ) -> EmbeddingBatchReport:
+        assert self._embedding_actor_ref is not None
+        msg = EmbeddingBatchMessage(
+            items=items,
+            tag=options.embedding_tag,
+            group_code=options.embedding_group_code,
+            group_name=options.embedding_group_name,
+            batch_size=options.embedding_batch_size,
+            skip_existing=options.skip_existing_embeddings,
+            test_id=options.test_id,
+            acted_by=options.acted_by,
+        )
+        res: Result[EmbeddingBatchReport] = self._embedding_actor_ref.ask(msg)
+        if res.status != STATUS_OK or res.value is None:
+            raise RuntimeError(f"EmbeddingActor failed (status={res.status}): {res.message}")
+        return res.value
+
+    def on_receive(self, message: Any) -> Result[Any]:
+        # Handle cleanup requests
+        if isinstance(message, ClinicalTermsCleanupMessage) or (
+            isinstance(message, dict) and message.get("type") == "CLEANUP_TEST_DATA"
+        ):
+            try:
+                cleanup_req = (
+                    message
+                    if isinstance(message, ClinicalTermsCleanupMessage)
+                    else ClinicalTermsCleanupMessage.model_validate(message)
+                )
+            except ValidationError as exc:
+                return Result(
+                    status=STATUS_BAD_REQUEST,
+                    message=f"Invalid ClinicalTermsCleanupMessage: {exc}",
+                    value_type="dict",
+                    value=None,
+                )
+            try:
+                payload: Dict[str, Any] = self._ingester.cleanup_test_data_sync(cleanup_req.test_id)
+                return Result(
+                    status=STATUS_OK,
+                    message=payload.get("message", "Test cleanup completed."),
+                    value_type="dict",
+                    value=payload,
+                )
+            except Exception as exc:
+                logger.error("clinical_terms_cleanup_actor_failed", error=str(exc), exc_info=True)
+                return Result(
+                    status=STATUS_INTERNAL_ERROR,
+                    message=f"Clinical terms test cleanup failed: {exc}",
+                    value_type="dict",
+                    value=None,
+                )
+
+        # Handle clinical terms ingestion requests
+        try:
+            if isinstance(message, ClinicalTermsIngestMessage):
+                ingest_req = message
+            elif isinstance(message, dict):
+                ingest_req = ClinicalTermsIngestMessage.model_validate(message)
+            else:
+                return Result(
+                    status=STATUS_BAD_REQUEST,
+                    message=f"Unsupported message type for ClinicalTermsIngestionActor: {type(message).__name__}",
+                    value_type="ClinicalTermsIngestionReport",
+                    value=None,
+                )
+        except ValidationError as exc:
+            logger.warning("clinical_terms_ingestion_actor_invalid_message", error=str(exc))
+            return Result(
+                status=STATUS_BAD_REQUEST,
+                message=f"Invalid ClinicalTermsIngestMessage: {exc}",
+                value_type="ClinicalTermsIngestionReport",
+                value=None,
+            )
+
+        try:
+            options = ClinicalTermsIngestionOptions(
+                source_dir=ingest_req.source_dir,
+                profile=ingest_req.profile,
+                vocabularies=ingest_req.vocabularies,
+                all_vocabularies=ingest_req.all_vocabularies,
+                domains=ingest_req.domains,
+                include_deprecated=ingest_req.include_deprecated,
+                include_synonyms=ingest_req.include_synonyms,
+                synonym_language_ids=ingest_req.synonym_language_ids,
+                all_synonym_languages=ingest_req.all_synonym_languages,
+                max_synonyms_per_concept=ingest_req.max_synonyms_per_concept,
+                include_relationships=ingest_req.include_relationships,
+                include_attribute_edges=ingest_req.include_attribute_edges,
+                include_rf2_metadata_edges=ingest_req.include_rf2_metadata_edges,
+                include_replaced_by_edges=ingest_req.include_replaced_by_edges,
+                max_concepts=ingest_req.max_concepts,
+                batch_size=ingest_req.batch_size,
+                acted_by=ingest_req.acted_by,
+                test_id=ingest_req.test_id,
+                ensure_schema=ingest_req.ensure_schema,
+                bootstrap_system=ingest_req.bootstrap_system,
+                compute_embeddings=ingest_req.compute_embeddings,
+                embed_standard_only=ingest_req.embed_standard_only,
+                embed_synonyms=ingest_req.embed_synonyms,
+                embedding_tag=ingest_req.embedding_tag,
+                embedding_group_code=ingest_req.embedding_group_code,
+                embedding_group_name=ingest_req.embedding_group_name,
+                embedding_batch_size=ingest_req.embedding_batch_size,
+                embedding_dispatch_chunk_size=ingest_req.embedding_dispatch_chunk_size,
+                skip_existing_embeddings=ingest_req.skip_existing_embeddings,
+                use_contextual_embedding_text=ingest_req.use_contextual_embedding_text,
+                dry_run=ingest_req.dry_run,
+            )
+            callback = self._dispatch_embeddings_to_actor if self._embedding_actor_ref is not None else None
+            report: ClinicalTermsIngestionReport = self._ingester.ingest_sync(options, embed_callback=callback)
+            return Result(
+                status=STATUS_OK,
+                message=(
+                    f"Clinical terms ingestion completed (profile={report.profile}, dry_run={report.dry_run}, "
+                    f"nodes={sum(report.node_counts.values())}, "
+                    f"relations={sum(report.relation_counts.values())})."
+                ),
+                value_type="ClinicalTermsIngestionReport",
+                value=report,
+            )
+        except Exception as exc:
+            logger.error("clinical_terms_ingestion_actor_failed", error=str(exc), exc_info=True)
+            return Result(
+                status=STATUS_INTERNAL_ERROR,
+                message=f"Clinical terms ingestion failed: {exc}",
+                value_type="ClinicalTermsIngestionReport",
+                value=None,
+            )
+
+
+__all__ = ["ClinicalTermsIngestionActor"]

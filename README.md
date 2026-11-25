@@ -32,15 +32,15 @@ gosmart-dictionary-service/
 ├── src/
 │   └── gosmart_dictionary_service/    # Importable package (src layout)
 │       ├── __init__.py                # Package docstring + __version__
-│       ├── __main__.py                # CLI (`gosmart-ds serve | bootstrap | ingest-dicom`)
+│       ├── __main__.py                # CLI (`gosmart-ds serve | bootstrap | ingest-dicom | ingest-clinical-terms`)
 │       ├── main.py                    # FastAPI app factory, lifespan, static assets & web mount
 │       ├── core/                      # Settings (`GOSMART_DS_*`), security, auth deps & structlog
 │       ├── db/                        # Neo4j async/sync driver & Cypher schema loader/DDL
 │       ├── api/                       # Versioned REST endpoints (`/api/v1/health`, `/auth`, `/chat`)
 │       ├── web/                       # Multi-page HTML portal (Jinja2 templates + static CSS/JS)
-│       ├── actor/                     # Pykka ThreadingActors (DicomIngestionActor, EmbeddingActor)
-│       ├── ingestor/                  # Batched Neo4j dictionary ingesters (DicomIngesterService)
-│       ├── model/                     # Pydantic domain models (System, Auth, LLM_Config, Embedding, DICOM)
+│       ├── actor/                     # Pykka ThreadingActors (DicomIngestionActor, ClinicalTermsIngestionActor, EmbeddingActor)
+│       ├── ingestor/                  # Batched Neo4j dictionary ingesters (DicomIngesterService, ClinicalTermsIngesterService)
+│       ├── model/                     # Pydantic domain models (System, Auth, LLM_Config, Embedding, DICOM, Clinical)
 │       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding)
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (TestClient)
@@ -116,6 +116,15 @@ uv run gosmart-ds ingest-dicom --source-dir ./data-source/dicom --dry-run
 # Ingest DICOM standard dictionary into Neo4j (and optionally compute 768-dim embeddings)
 uv run gosmart-ds ingest-dicom --source-dir ./data-source/dicom --bootstrap
 uv run gosmart-ds ingest-dicom --source-dir ./data-source/dicom --bootstrap --compute-embeddings
+
+# Validate OHDSI Athena clinical terms CSVs (dry run — zero DB writes)
+uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-terms --profile full --dry-run
+
+# Ingest full clinical graph (SNOMED, LOINC, ICD10CM, UCUM; ~1.50M concepts — recommended 32 GB Neo4j host)
+uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-terms --profile full --bootstrap
+
+# Ingest reduced demo-core clinical graph (~455k valid concepts across Condition/Measurement/Procedure/Anatomy/Unit — fits 8 GB Linux VM)
+uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-terms --profile demo-core --bootstrap
 ```
 
 ### Web Portal & Endpoints

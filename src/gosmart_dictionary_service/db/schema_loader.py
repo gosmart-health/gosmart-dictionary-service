@@ -19,6 +19,7 @@ SCHEMA_SCRIPT_FILES: tuple[str, ...] = (
     "system_schema.cypher",
     "embedding_schema.cypher",
     "dicom_schema.cypher",
+    "clinical_schema.cypher",
 )
 
 _DEFAULT_SCHEMA_DIR = Path(__file__).resolve().parent
