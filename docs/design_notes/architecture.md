@@ -335,3 +335,16 @@ Exposed over `StreamableHTTP` and `SSE` (authenticated via `X-API-Key` header) a
 - **[WHO ICD-11 API & Linearization Packages](https://icd.who.int/icdapi)** — Official WHO ICD-11 Foundation and MMS releases if supplementary attributes or newer ICD-10 ↔ ICD-11 mappings are needed beyond the Athena bundle.
 - **[SNOMED CT BioPortal Ontologies (SCTO)](https://bioportal.bioontology.org/ontologies/SCTO/)** & **[LOINC](https://loinc.org/)** — Reference documentation and optional domain-specific enrichments (e.g., LOINC/RSNA Radiology Playbook).
 - **Licensing Note for Public Access:** Registration (`/api/v1/auth/register`) captures registrant terms-of-use acceptance (`terms_accepted_at` on `:User`) to cover standard LOINC and SNOMED CT / UMLS affiliate attribution and non-redistribution terms before activating an `X-API-Key`.
+
+## Appendix: Default Configurations
+
+Due to `gosmart-graphite` already using the system default port numbers for
+`neo4j` and API port we are using these port numbers and configurations.
+
+| Configuration | Description | Default Value |
+| --- | --- | --- |
+| `neo4j local bolt port` | Neo4j container name | 7688 |
+| `neo4j local web port` | Neo4j Web access | 7475 |
+| `API Endpoint` | Primary DICOM dictionary source | 8081|
+
+

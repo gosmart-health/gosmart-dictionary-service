@@ -1,19 +1,11 @@
 """Allow ``python -m gosmart_dictionary_service`` to start the API server."""
 
-import uvicorn
-
-HOST = "127.0.0.1"
-PORT = 8000
+from gosmart_dictionary_service.main import run
 
 
 def main() -> None:
-    """Serve the FastAPI app with uvicorn (reload enabled for local development)."""
-    uvicorn.run(
-        "gosmart_dictionary_service.main:app",
-        host=HOST,
-        port=PORT,
-        reload=True,
-    )
+    """Serve the FastAPI app with uvicorn using configured settings."""
+    run()
 
 
 if __name__ == "__main__":
