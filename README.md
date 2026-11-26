@@ -29,6 +29,7 @@ terminology resolution and enrichment.
 gosmart-dictionary-service/
 ├── pyproject.toml                     # Project metadata, dependencies, tool config
 ├── .env.example                       # Sample GOSMART_DS_* configuration
+├── notebooks/                         # Interactive Jupyter playgrounds (DICOM & Clinical Terms)
 ├── src/
 │   └── gosmart_dictionary_service/    # Importable package (src layout)
 │       ├── __init__.py                # Package docstring + __version__
@@ -40,8 +41,8 @@ gosmart-dictionary-service/
 │       ├── web/                       # Multi-page HTML portal (Jinja2 templates + static CSS/JS)
 │       ├── actor/                     # Pykka ThreadingActors (DicomIngestionActor, ClinicalTermsIngestionActor, EmbeddingActor)
 │       ├── ingestor/                  # Batched Neo4j dictionary ingesters (DicomIngesterService, ClinicalTermsIngesterService)
-│       ├── model/                     # Pydantic domain models (System, Auth, LLM_Config, Embedding, DICOM, Clinical)
-│       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding)
+│       ├── model/                     # Pydantic domain models (System, Auth, LLM_Config, Embedding, Search, DICOM, Clinical)
+│       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding, Search, NLU stub)
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (TestClient)
 │   ├── unit/                          # Unit tests
@@ -126,6 +127,26 @@ uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-term
 # Ingest reduced demo-core clinical graph (~455k valid concepts across Condition/Measurement/Procedure/Anatomy/Unit — fits 8 GB Linux VM)
 uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-terms --profile demo-core --bootstrap
 ```
+
+### Unified Search Service & Playgrounds
+
+`SearchService` (`gosmart_dictionary_service.service.search_service`) exposes a unified NLU-guided `search(query: str, ...)` entrypoint (with `StubNLUService` implementing `NLUParserProtocol` pending migration of the trained `gosmart-graphite` NLU) alongside granular ontology primitives (`lookup_code`, `lookup_dicom`, `find_related_concepts`, `expand_descendants`, `crosswalk`, `subsumes`) and dual `fhir` / MCP `compact` wire projections:
+
+```python
+from gosmart_dictionary_service.model.search import ResponseFormat, SearchEntityType
+from gosmart_dictionary_service.service.search_service import search_service
+
+# Unified natural-language search (Lucene + 1-hop [:IS_A] parent convergence + on-the-fly embedding rerank)
+res = await search_service.search("acute pneumonia", entity_types=[SearchEntityType.CONCEPT])
+
+# Forward + reverse + 2-hop shared-axis related concept aggregation
+rel = await search_service.search("Find something related to LOINC 87279-6")
+compact_mcp_payload = rel.to_wire(ResponseFormat.COMPACT)
+```
+
+Interactive Jupyter playgrounds:
+- [`notebooks/dicom_graph_playground.ipynb`](./notebooks/dicom_graph_playground.ipynb)
+- [`notebooks/clinical_terms_playground.ipynb`](./notebooks/clinical_terms_playground.ipynb)
 
 ### Web Portal & Endpoints
 

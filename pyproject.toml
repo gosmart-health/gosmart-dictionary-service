@@ -11,6 +11,7 @@ dependencies = [
     "genkit>=0.14.0",
     "genkit-google-genai>=0.14.0",
     "genkit-ollama>=0.14.0",
+    "gosmart-clinical-nlu",
     "httpx>=0.28.1",
     "jinja2>=3.1.6",
     "neo4j>=6.4.1",
@@ -66,3 +67,7 @@ select = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["gosmart_dictionary_service", "tests"]
+
+[tool.uv.sources]
+gosmart-clinical-nlu = { git = "https://github.com/gosmart-health/gosmart-clinical-nlu.git", rev = "main" }
+
