@@ -1,5 +1,0 @@
-{
-  "name": "get_report",
-  "label": "GET_REPORT",
-  "description": "Fetch the radiology report for a study."
-}

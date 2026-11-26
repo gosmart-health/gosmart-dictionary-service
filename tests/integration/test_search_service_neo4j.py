@@ -1,4 +1,4 @@
-"""Live Neo4j integration tests for SearchService.
+"""Live Neo4j integration tests for SearchService and ClinicalNLUService.
 
 Follows AGENTS.md testing rules:
 - Cleans up test_id-scoped synthetic records BEFORE running (not after) so post-test graph
@@ -25,7 +25,7 @@ TEST_ID = "test_search_service_neo4j"
 
 
 def test_search_service_isolated_graph_operations() -> None:
-    """Verify lookup, forward/reverse/shared-axis related aggregation, crosswalk, expand, and subsumes."""
+    """Verify lookup, forward/reverse/shared-axis related aggregation, crosswalk, expand, subsumes, and NLU alerts."""
 
     async def _run() -> None:
         client = Neo4jClient()
@@ -163,6 +163,7 @@ def test_search_service_isolated_graph_operations() -> None:
             # Crosswalk ICD10CM -> SNOMED
             mapped = await svc.crosswalk("ICD10CM", "T-J18.9", target_vocabularies=["SNOMED"], test_id=TEST_ID)
             assert len(mapped) == 1
+            assert mapped[0].coding.code == "T-J18.9" or mapped[0].coding.code == "T-233604007"
             assert mapped[0].coding.code == "T-233604007"
 
             # Unified search() routing for "Find something related to LOINC T-87279-6"
@@ -175,6 +176,12 @@ def test_search_service_isolated_graph_operations() -> None:
             assert resp.total_hits == 1
             assert resp.hits[0].coding.code == "T-87279-6"
             assert any(r.coding.code == "T-24627-2" for r in resp.hits[0].related)
+
+            # Dynamic schema alert on unloaded RxNorm against isolated test_id graph
+            rx_resp = await svc.search("RxNorm 1191", rerank_with_embeddings=False, test_id=TEST_ID)
+            assert rx_resp.total_hits == 0
+            assert rx_resp.nlu.unsupported_vocabularies == ["RxNorm"]
+            assert any("RxNorm" in w and "ICD10CM, LOINC, SNOMED" in w for w in rx_resp.warnings)
         finally:
             await client.close()
 
@@ -206,7 +213,19 @@ def test_search_service_production_readonly_smoke() -> None:
             assert len(rel_resp.hits[0].related) >= 5
             assert any(r.relation_reason == MatchSource.SHARED_ATTRIBUTE for r in rel_resp.hits[0].related)
 
-            # 2) Clinical free-text search with 1-hop [:IS_A] parent convergence
+            # 2) Direct code query ("LOINC 87279-6") -> 1.0 deterministic hit + reverse-lookup discovery < 1.0
+            disc_resp = await svc.search(
+                "LOINC 87279-6",
+                rerank_with_embeddings=False,
+                limit=8,
+            )
+            assert disc_resp.hits[0].coding.code == "87279-6"
+            assert disc_resp.hits[0].score == 1.0
+            assert disc_resp.nlu.rewritten_query == seed.coding.display
+            assert len(disc_resp.hits) >= 2
+            assert all(h.score <= 0.85 for h in disc_resp.hits[1:])
+
+            # 3) Clinical free-text search with 1-hop [:IS_A] parent convergence
             pneu_resp = await svc.search(
                 "acute pneumonia",
                 entity_types=[SearchEntityType.CONCEPT],
@@ -217,7 +236,7 @@ def test_search_service_production_readonly_smoke() -> None:
             returned_codes = {h.coding.code for h in pneu_resp.hits}
             assert "233604007" in returned_codes  # SNOMED Pneumonia surfaced via parent convergence!
 
-            # 3) Subsumption check: Myocardial infarction subsumes Acute myocardial infarction
+            # 4) Subsumption check: Myocardial infarction subsumes Acute myocardial infarction
             outcome = await svc.subsumes("SNOMED", "22298006", "SNOMED", "57054005")
             assert outcome == "subsumes"
         finally:

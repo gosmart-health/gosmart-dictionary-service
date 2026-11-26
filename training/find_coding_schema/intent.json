@@ -1,0 +1,7 @@
+{
+  "name": "find_coding_schema",
+  "label": "FIND_CODING_SCHEMA",
+  "description": "Look up a specific clinical terminology code or DICOM tag by coding schema and identifier.",
+  "min_confidence": 0.6,
+  "required_fields": []
+}

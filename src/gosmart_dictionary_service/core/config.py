@@ -178,6 +178,27 @@ class Settings(BaseSettings):
         description="Optional Google Cloud Project ID for Vertex AI",
     )
 
+    # Clinical NLU & Query Expansion Configuration
+    NLU_MODEL_PATH: str = Field(
+        default="./nlu_models/intent_models.zip",
+        description="Path to the trained gosmart-clinical-nlu spaCy model bundle (.zip)",
+    )
+    NLU_LLM_EXPANSION_ENABLED: bool = Field(
+        default=True,
+        description="Synthesize alternate clinical/DICOM search phrases via the inference LLM during NLU parsing",
+    )
+    NLU_MAX_ALTERNATE_PHRASES: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Maximum number of alternate search phrases synthesized per query (default: 3)",
+    )
+    NLU_SCHEMA_CACHE_TTL_SEC: float = Field(
+        default=60.0,
+        ge=0.0,
+        description="TTL in seconds for caching loaded Neo4j coding schemas during NLU schema checks",
+    )
+
     # Dynamic LLM Configuration Security Settings
     LLM_CONFIG_ENCRYPTION_KEY: Optional[SecretStr] = Field(
         default=None,

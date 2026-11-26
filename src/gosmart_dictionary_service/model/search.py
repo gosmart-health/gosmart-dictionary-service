@@ -64,6 +64,7 @@ class MatchSource(StrEnum):
     FULLTEXT = "fulltext"
     VECTOR = "vector"
     HYBRID = "hybrid"
+    LLM_EXPANSION = "llm_expansion"
     IS_A_PARENT = "is_a_parent"
     IS_A_CHILD = "is_a_child"
     MAPS_TO = "maps_to"
@@ -100,6 +101,20 @@ class ExtractedCodeEntity(BaseModel):
     code: str = Field(..., description="Extracted code value (e.g. '87279-6', '233604007', '00180050')")
     raw_span: str = Field(default="", description="Original matched substring from the user query")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Extraction confidence score")
+    start_char: Optional[int] = Field(default=None, description="Start character offset of raw_span in cleaned query")
+    end_char: Optional[int] = Field(default=None, description="End character offset of raw_span in cleaned query")
+    resolved: Optional[bool] = Field(
+        default=None,
+        description="Whether the extracted code resolved against the active Neo4j dictionary",
+    )
+    resolved_display: Optional[str] = Field(
+        default=None,
+        description="Reverse-looked-up human-readable display/name for query rewriting",
+    )
+    is_schema_loaded: Optional[bool] = Field(
+        default=None,
+        description="Whether the coding schema is loaded in the active Neo4j database",
+    )
 
 
 class NLUParseResult(BaseModel):
@@ -107,7 +122,19 @@ class NLUParseResult(BaseModel):
 
     raw_query: str = Field(..., description="Original user query string")
     normalized_query: str = Field(..., description="Whitespace-normalized search phrase stripped of intent scaffolding")
+    rewritten_query: Optional[str] = Field(
+        default=None,
+        description="Query string with resolved code spans replaced by their reverse-looked-up display text",
+    )
+    synthesized_phrases: List[str] = Field(
+        default_factory=list,
+        description="Alternate clinical/DICOM search phrases synthesized via the inference LLM",
+    )
     intent: NLUIntent = Field(default=NLUIntent.SEARCH, description="Detected routing intent")
+    nlu_confidence: Optional[float] = Field(
+        default=None,
+        description="Intent confidence score returned by the trained spaCy NLU pipeline when available",
+    )
     extracted_codes: List[ExtractedCodeEntity] = Field(
         default_factory=list,
         description="Explicit vocabulary/code or DICOM tag/UID entities extracted from the query",
@@ -128,9 +155,17 @@ class NLUParseResult(BaseModel):
         default_factory=list,
         description="Target vocabularies for CROSSWALK intent (e.g. ['SNOMED'])",
     )
+    unsupported_vocabularies: List[str] = Field(
+        default_factory=list,
+        description="Extracted coding schemas that are not loaded in the active Neo4j database",
+    )
     modifier_text: Optional[str] = Field(
         default=None,
         description="Optional free-text qualifier accompanying a RELATED_LOOKUP (e.g. 'with contrast')",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Non-fatal NLU warnings (unloaded schemas, unknown codes, or LLM fallback notes)",
     )
     provider: str = Field(default="stub", description="NLU implementation identifier (e.g. 'stub', 'gosmart-nlu')")
 
@@ -298,6 +333,10 @@ class SearchOptions(BaseModel):
     rerank_with_embeddings: bool = Field(
         default=True,
         description="Use on-the-fly embedding-v1 reranking for clinical hits and HNSW vector index for DICOM hits",
+    )
+    expand_with_llm: Optional[bool] = Field(
+        default=None,
+        description="Synthesize alternate search phrases via the inference LLM (defaults to NLU_LLM_EXPANSION_ENABLED)",
     )
     embedding_tag: str = Field(
         default=DEFAULT_EMBEDDING_CONFIG_TAG,

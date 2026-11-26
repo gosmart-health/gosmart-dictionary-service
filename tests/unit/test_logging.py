@@ -29,12 +29,14 @@ def _cleanup_file_handlers() -> None:
 
 
 def test_settings_defaults_and_trimmed_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify GoSmart DS defaults and confirm DICOM/FHIR/NLU/cloud fields are removed."""
+    """Verify GoSmart DS defaults (including NLU settings) and confirm DICOM SCP/FHIR/storage fields are removed."""
     for key in (
         "GOSMART_DS_APP_NAME",
         "GOSMART_DS_PORT",
         "GOSMART_DS_LOG_FILE",
         "GOSMART_DS_DB_CONNECTION_URI",
+        "GOSMART_DS_NLU_MODEL_PATH",
+        "GOSMART_DS_NLU_LLM_EXPANSION_ENABLED",
         "NEO4J_URI",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -45,13 +47,15 @@ def test_settings_defaults_and_trimmed_schema(monkeypatch: pytest.MonkeyPatch) -
     assert settings.LOG_FILE == "gosmart_ds.log"
     assert settings.API_KEY_PREFIX == "gs_dict_"
     assert settings.DB_CONNECTION_URI == "bolt://localhost:7688"
+    assert settings.NLU_MODEL_PATH == "./nlu_models/intent_models.zip"
+    assert settings.NLU_LLM_EXPANSION_ENABLED is True
+    assert settings.NLU_MAX_ALTERNATE_PHRASES == 3
 
     for removed_field in (
         "DICOM_AE_TITLE",
         "DICOM_SCP_PORT",
         "DICOM_STAGING_DIR",
         "FHIR_BASE_URL",
-        "NLU_MODEL_PATH",
         "STORAGE_ROOT_URI",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "AWS_ACCESS_KEY_ID",

@@ -31,7 +31,11 @@ from gosmart_dictionary_service.model.search import (
 )
 from gosmart_dictionary_service.service.embedding_service import EmbeddingService
 from gosmart_dictionary_service.service.llm_config_service import LLMConfigService
-from gosmart_dictionary_service.service.nlu_service import NLUParserProtocol, stub_nlu_service
+from gosmart_dictionary_service.service.nlu_service import (
+    ClinicalNLUService,
+    NLUParserProtocol,
+    StubNLUService,
+)
 from gosmart_dictionary_service.service.system_service import DEFAULT_GROUP_CODE, normalize_test_id
 
 logger = get_logger("gosmart_ds.search")
@@ -43,6 +47,13 @@ _LUCENE_SPECIAL_RE = re.compile(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)')
 
 # Maximum hub degree for 2-hop shared-attribute traversal (skips generic hubs like 'Point in time')
 _MAX_SHARED_AXIS_DEGREE = 5000
+
+# Probability discount & cap constants for hybrid discovery beneath deterministic code matches
+_REWRITTEN_DISCOUNT_WITH_EXACT = 0.78
+_REWRITTEN_CAP_WITH_EXACT = 0.85
+_SYNTHESIZED_PHRASE_DISCOUNT = 0.68
+_SYNTHESIZED_PHRASE_CAP = 0.78
+_CONSENSUS_BOOST_PER_EXTRA_PHRASE = 0.03
 
 # Priority weights for ordering aggregated related concepts
 _RELATION_BASE_SCORE: Dict[MatchSource, float] = {
@@ -497,6 +508,13 @@ def _normalize_dicom_tag(raw: str) -> Tuple[str, str]:
     return raw.strip().upper(), raw.strip()
 
 
+def _vocab_lookup_candidates(vocabulary_id: str) -> Tuple[str, ...]:
+    trimmed = vocabulary_id.strip()
+    if trimmed.upper() == "ICD10":
+        return ("ICD10", "ICD10CM", "ICD10PCS")
+    return (trimmed,)
+
+
 def _build_concept_hit(
     row: Dict[str, Any],
     *,
@@ -670,7 +688,12 @@ class SearchService:
             llm_config_service=self.llm_config_service,
             settings=self.settings,
         )
-        self.nlu_service: NLUParserProtocol = nlu_service or stub_nlu_service
+        self._owns_default_nlu = nlu_service is None
+        self.nlu_service: NLUParserProtocol = nlu_service or ClinicalNLUService(
+            client=self.client,
+            llm_config_service=self.llm_config_service,
+            settings=self.settings,
+        )
 
     # -------------------------------------------------------------------------
     # High-Level Unified Entrypoint
@@ -690,6 +713,7 @@ class SearchService:
         related_limit: int = 12,
         include_shared_attributes: bool = True,
         rerank_with_embeddings: bool = True,
+        expand_with_llm: Optional[bool] = None,
         embedding_tag: str = DEFAULT_EMBEDDING_CONFIG_TAG,
         limit: int = 10,
         test_id: Optional[str] = None,
@@ -699,13 +723,30 @@ class SearchService:
         norm_test_id = normalize_test_id(test_id)
         warnings: List[str] = []
 
-        nlu = await self.nlu_service.parse_async(query)
+        if isinstance(self.nlu_service, (ClinicalNLUService, StubNLUService)):
+            if isinstance(self.nlu_service, ClinicalNLUService) and self._owns_default_nlu:
+                self.nlu_service.llm_config_service = self.llm_config_service
+            nlu = await self.nlu_service.parse_async(
+                query,
+                test_id=norm_test_id,
+                expand_with_llm=expand_with_llm,
+            )
+        else:
+            nlu = await self.nlu_service.parse_async(query)
+
+        for nlu_warning in nlu.warnings:
+            if nlu_warning not in warnings:
+                warnings.append(nlu_warning)
+
         explicit_entity_types = normalize_entity_types(entity_types)
         target_entity_types = self._resolve_entity_types(explicit_entity_types, nlu)
 
+        explicit_vocabs: Optional[List[str]] = (
+            [v.strip() for v in vocabularies if v and v.strip()] if vocabularies else None
+        )
         resolved_vocabs: Optional[List[str]] = (
-            [v.strip() for v in vocabularies if v and v.strip()]
-            if vocabularies
+            explicit_vocabs
+            if explicit_vocabs is not None
             else (list(nlu.inferred_vocabularies) if nlu.inferred_vocabularies else None)
         )
         resolved_domains: Optional[List[str]] = (
@@ -714,7 +755,6 @@ class SearchService:
             else (list(nlu.inferred_domains) if nlu.inferred_domains else None)
         )
 
-        hits: List[SearchHit] = []
         if not nlu.normalized_query and not nlu.extracted_codes:
             return SearchResponse(
                 query=query,
@@ -725,9 +765,8 @@ class SearchService:
                 duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             )
 
-        # 1) Direct / Relational / Crosswalk / Subtypes routing when NLU extracts explicit code(s)
+        # 1) Pure ontology graph intents (RELATED_LOOKUP, CROSSWALK, EXPAND_SUBTYPES)
         if nlu.extracted_codes and nlu.intent in {
-            NLUIntent.EXACT_LOOKUP,
             NLUIntent.RELATED_LOOKUP,
             NLUIntent.CROSSWALK,
             NLUIntent.EXPAND_SUBTYPES,
@@ -745,54 +784,99 @@ class SearchService:
                 test_id=norm_test_id,
                 warnings=warnings,
             )
+            duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            return SearchResponse(
+                query=query,
+                nlu=nlu,
+                total_hits=len(hits),
+                hits=hits,
+                warnings=warnings,
+                duration_ms=duration_ms,
+            )
 
-        # 2) Free-text search (or fallback if extracted code was not found in Neo4j)
-        if not hits:
-            search_text = nlu.normalized_query or query.strip()
-            clinical_requested = SearchEntityType.CONCEPT in target_entity_types
-            dicom_labels = [et for et in target_entity_types if et in DICOM_ENTITY_TYPES]
-
-            clinical_hits: List[SearchHit] = []
-            dicom_hits: List[SearchHit] = []
-
-            if clinical_requested:
-                clinical_hits = await self._search_clinical(
-                    query_text=search_text,
-                    vocabularies=resolved_vocabs,
-                    domains=resolved_domains,
-                    valid_only=valid_only,
-                    standard_only=standard_only,
-                    rerank_with_embeddings=rerank_with_embeddings,
-                    embedding_tag=embedding_tag,
-                    limit=limit,
+        # 2) Unified Discovery Pipeline (SEARCH & EXACT_LOOKUP):
+        #    a) Resolve deterministic exact codes at probability 1.0
+        #    b) Run hybrid Lucene + Vector search across Clinical + DICOM for the reverse-looked-up
+        #       rewritten query and LLM-synthesized alternate phrases at discounted probabilities
+        deterministic_by_id: Dict[str, SearchHit] = {}
+        for entity in nlu.extracted_codes:
+            if entity.is_schema_loaded is False or entity.resolved is False:
+                continue
+            if entity.vocabulary_id in {"DICOM_TAG", "DICOM_UID"}:
+                det_hit = await self.lookup_dicom(
+                    entity.code,
+                    include_related=include_related,
+                    related_limit=related_limit,
                     test_id=norm_test_id,
-                    warnings=warnings,
                 )
-
-            if dicom_labels:
-                dicom_hits = await self._search_dicom(
-                    query_text=search_text,
-                    entity_types=dicom_labels,
-                    valid_only=valid_only,
-                    rerank_with_embeddings=rerank_with_embeddings,
-                    embedding_tag=embedding_tag,
-                    limit=limit,
-                    test_id=norm_test_id,
-                    warnings=warnings,
-                )
-
-            hits = self._merge_hits(clinical_hits, dicom_hits, limit=limit)
-
-            if include_related and hits:
-                await self._attach_related_to_hits(
-                    hits,
-                    direction=related_direction,
+            else:
+                det_hit = await self.lookup_code(
+                    entity.vocabulary_id,
+                    entity.code,
+                    include_related=include_related,
+                    related_direction=related_direction,
                     include_shared_attributes=include_shared_attributes,
-                    valid_only=valid_only,
                     related_limit=related_limit,
                     test_id=norm_test_id,
                 )
 
+            if det_hit is not None:
+                entity.resolved = True
+                if not entity.resolved_display:
+                    entity.resolved_display = det_hit.coding.display
+                deterministic_by_id.setdefault(det_hit.id, det_hit)
+            elif entity.resolved is None:
+                entity.resolved = False
+                label = entity.raw_span or f"{entity.vocabulary_id} {entity.code}"
+                msg = f"Code '{label}' was not found in the active dictionary database and was skipped."
+                if msg not in warnings:
+                    warnings.append(msg)
+
+        has_deterministic = bool(deterministic_by_id)
+        weighted_phrases = self._build_weighted_discovery_phrases(
+            query=query,
+            nlu=nlu,
+            has_deterministic=has_deterministic,
+        )
+
+        # When codes were extracted, search BOTH Clinical Concepts and DICOM entities by default
+        # so queries like "LOINC 87279-6" discover related terminology & DICOM attributes together.
+        if explicit_entity_types is not None:
+            expansion_entity_types = explicit_entity_types
+        elif nlu.extracted_codes:
+            expansion_entity_types = sorted(DEFAULT_UNIFIED_ENTITY_TYPES, key=lambda et: et.value)
+        else:
+            expansion_entity_types = target_entity_types
+
+        expansion_vocabs = explicit_vocabs if nlu.extracted_codes else resolved_vocabs
+
+        discovered_hits = await self._execute_multi_phrase_discovery(
+            weighted_phrases=weighted_phrases,
+            deterministic_ids=set(deterministic_by_id.keys()),
+            has_deterministic=has_deterministic,
+            entity_types=expansion_entity_types,
+            vocabularies=expansion_vocabs,
+            domains=resolved_domains,
+            valid_only=valid_only,
+            standard_only=standard_only,
+            rerank_with_embeddings=rerank_with_embeddings,
+            embedding_tag=embedding_tag,
+            limit=limit,
+            test_id=norm_test_id,
+            warnings=warnings,
+        )
+
+        if include_related and discovered_hits:
+            await self._attach_related_to_hits(
+                discovered_hits,
+                direction=related_direction,
+                include_shared_attributes=include_shared_attributes,
+                valid_only=valid_only,
+                related_limit=related_limit,
+                test_id=norm_test_id,
+            )
+
+        hits = (list(deterministic_by_id.values()) + discovered_hits)[:limit]
         duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         return SearchResponse(
             query=query,
@@ -825,10 +909,14 @@ class SearchService:
     ) -> Optional[SearchHit]:
         """Exact O(1) indexed lookup of a clinical ``(:Concept {vocabulary_id, code})``."""
         norm_test_id = normalize_test_id(test_id)
-        rows = await self.client.execute_query(
-            _LOOKUP_CONCEPT_CYPHER,
-            {"vocab": vocabulary_id.strip(), "code": code.strip(), "test_id": norm_test_id},
-        )
+        rows: List[Dict[str, Any]] = []
+        for candidate_vocab in _vocab_lookup_candidates(vocabulary_id):
+            rows = await self.client.execute_query(
+                _LOOKUP_CONCEPT_CYPHER,
+                {"vocab": candidate_vocab, "code": code.strip(), "test_id": norm_test_id},
+            )
+            if rows:
+                break
         if not rows:
             return None
 
@@ -989,7 +1077,6 @@ class SearchService:
                 "min_shared_axes": max(1, min_shared_axes),
             }
             shared_rows = await self.client.execute_query(_RELATED_SHARED_ATTRS_CYPHER, shared_params)
-            # If 2+ shared axes found nothing (e.g., concept has only 1 specific axis), retry with >= 1
             if not shared_rows and min_shared_axes > 1:
                 shared_params["min_shared_axes"] = 1
                 shared_rows = await self.client.execute_query(_RELATED_SHARED_ATTRS_CYPHER, shared_params)
@@ -1174,6 +1261,177 @@ class SearchService:
             return list(nlu.inferred_entity_types)
         return sorted(DEFAULT_UNIFIED_ENTITY_TYPES, key=lambda et: et.value)
 
+    @staticmethod
+    def _build_weighted_discovery_phrases(
+        *,
+        query: str,
+        nlu: NLUParseResult,
+        has_deterministic: bool,
+    ) -> List[Tuple[str, float, float, Tuple[MatchSource, ...]]]:
+        """Build ``(phrase_text, weight, cap, extra_sources)`` tuples for multi-phrase discovery."""
+        if nlu.rewritten_query is not None:
+            primary = nlu.rewritten_query.strip()
+        elif nlu.extracted_codes and all(e.resolved is False for e in nlu.extracted_codes):
+            # Guardrail: never send unresolved raw code numbers into lexical/vector discovery
+            primary = ""
+        elif nlu.extracted_codes:
+            rewritten = ClinicalNLUService._rewrite_query_with_resolutions(
+                " ".join(query.strip().split()),
+                nlu.extracted_codes,
+            )
+            primary = rewritten.strip()
+        else:
+            primary = (nlu.normalized_query or query).strip()
+
+        phrases: List[Tuple[str, float, float, Tuple[MatchSource, ...]]] = []
+        seen_lower: Set[str] = set()
+
+        if primary:
+            t2_weight = _REWRITTEN_DISCOUNT_WITH_EXACT if has_deterministic else 1.0
+            t2_cap = _REWRITTEN_CAP_WITH_EXACT if has_deterministic else 1.0
+            phrases.append((primary, t2_weight, t2_cap, ()))
+            seen_lower.add(primary.lower())
+
+        for alt in nlu.synthesized_phrases:
+            clean_alt = " ".join(alt.strip().split())
+            if not clean_alt or clean_alt.lower() in seen_lower:
+                continue
+            seen_lower.add(clean_alt.lower())
+            phrases.append(
+                (
+                    clean_alt,
+                    _SYNTHESIZED_PHRASE_DISCOUNT,
+                    _SYNTHESIZED_PHRASE_CAP,
+                    (MatchSource.LLM_EXPANSION,),
+                )
+            )
+        return phrases
+
+    async def _execute_multi_phrase_discovery(
+        self,
+        *,
+        weighted_phrases: Sequence[Tuple[str, float, float, Tuple[MatchSource, ...]]],
+        deterministic_ids: Set[str],
+        has_deterministic: bool,
+        entity_types: Sequence[SearchEntityType],
+        vocabularies: Optional[List[str]],
+        domains: Optional[List[str]],
+        valid_only: bool,
+        standard_only: bool,
+        rerank_with_embeddings: bool,
+        embedding_tag: str,
+        limit: int,
+        test_id: Optional[str],
+        warnings: List[str],
+    ) -> List[SearchHit]:
+        """Run Clinical + DICOM hybrid search across weighted phrases and aggregate with discounted probabilities."""
+        if not weighted_phrases:
+            return []
+
+        clinical_requested = SearchEntityType.CONCEPT in entity_types
+        dicom_labels = [et for et in entity_types if et in DICOM_ENTITY_TYPES]
+        if not clinical_requested and not dicom_labels:
+            return []
+
+        # Pre-batch phrase embeddings when running multiple phrases so we avoid N separate HTTP calls
+        phrase_vec_map: Dict[str, List[float]] = {}
+        candidate_vec_cache: Optional[Dict[str, List[float]]] = None
+        if rerank_with_embeddings and len(weighted_phrases) > 1:
+            phrase_texts = [p[0] for p in weighted_phrases]
+            vecs = await self._safe_embed_texts(phrase_texts, embedding_tag=embedding_tag, warnings=warnings)
+            if vecs is not None and len(vecs) == len(phrase_texts):
+                phrase_vec_map = {txt: vec for txt, vec in zip(phrase_texts, vecs)}
+                candidate_vec_cache = {}
+
+        per_phrase_limit = max(limit * 2, 15)
+        best_hit_by_id: Dict[str, SearchHit] = {}
+        max_weighted_by_id: Dict[str, float] = {}
+        max_cap_by_id: Dict[str, float] = {}
+        phrase_hits_count: Dict[str, int] = {}
+        merged_sources_by_id: Dict[str, Set[MatchSource]] = {}
+        best_lex_by_id: Dict[str, float] = {}
+        best_vec_by_id: Dict[str, float] = {}
+
+        for phrase_text, weight, cap, extra_sources in weighted_phrases:
+            q_vec = phrase_vec_map.get(phrase_text)
+            phrase_results: List[SearchHit] = []
+
+            if clinical_requested:
+                c_hits = await self._search_clinical(
+                    query_text=phrase_text,
+                    vocabularies=vocabularies,
+                    domains=domains,
+                    valid_only=valid_only,
+                    standard_only=standard_only,
+                    rerank_with_embeddings=rerank_with_embeddings,
+                    embedding_tag=embedding_tag,
+                    limit=per_phrase_limit,
+                    test_id=test_id,
+                    warnings=warnings,
+                    precomputed_query_vec=q_vec,
+                    candidate_vec_cache=candidate_vec_cache,
+                )
+                phrase_results.extend(c_hits)
+
+            if dicom_labels:
+                d_hits = await self._search_dicom(
+                    query_text=phrase_text,
+                    entity_types=dicom_labels,
+                    valid_only=valid_only,
+                    rerank_with_embeddings=rerank_with_embeddings,
+                    embedding_tag=embedding_tag,
+                    limit=per_phrase_limit,
+                    test_id=test_id,
+                    warnings=warnings,
+                    precomputed_query_vec=q_vec,
+                )
+                phrase_results.extend(d_hits)
+
+            seen_in_this_phrase: Set[str] = set()
+            for hit in phrase_results:
+                if hit.id in deterministic_ids:
+                    continue
+
+                discounted = min(cap, round(hit.score * weight, 4))
+                if hit.id not in seen_in_this_phrase:
+                    seen_in_this_phrase.add(hit.id)
+                    phrase_hits_count[hit.id] = phrase_hits_count.get(hit.id, 0) + 1
+
+                src_set = merged_sources_by_id.setdefault(hit.id, set())
+                src_set.update(hit.match_sources)
+                src_set.update(extra_sources)
+
+                if hit.lexical_score is not None:
+                    best_lex_by_id[hit.id] = max(best_lex_by_id.get(hit.id, 0.0), hit.lexical_score)
+                if hit.vector_score is not None:
+                    prev_vec = best_vec_by_id.get(hit.id)
+                    best_vec_by_id[hit.id] = hit.vector_score if prev_vec is None else max(prev_vec, hit.vector_score)
+
+                max_cap_by_id[hit.id] = max(max_cap_by_id.get(hit.id, 0.0), cap)
+                if hit.id not in max_weighted_by_id or discounted > max_weighted_by_id[hit.id]:
+                    max_weighted_by_id[hit.id] = discounted
+                    best_hit_by_id[hit.id] = hit
+
+        aggregated: List[SearchHit] = []
+        for hid, base_hit in best_hit_by_id.items():
+            overall_cap = _REWRITTEN_CAP_WITH_EXACT if has_deterministic else max_cap_by_id[hid]
+            consensus_boost = _CONSENSUS_BOOST_PER_EXTRA_PHRASE * max(0, phrase_hits_count.get(hid, 1) - 1)
+            final_score = round(min(overall_cap, max_weighted_by_id[hid] + consensus_boost), 4)
+            ordered_sources = sorted(merged_sources_by_id[hid], key=lambda s: s.value)
+            aggregated.append(
+                base_hit.model_copy(
+                    update={
+                        "score": final_score,
+                        "match_sources": ordered_sources,
+                        "lexical_score": best_lex_by_id.get(hid),
+                        "vector_score": best_vec_by_id.get(hid),
+                    }
+                )
+            )
+
+        aggregated.sort(key=lambda h: (-h.score, h.coding.display.lower()))
+        return aggregated[:limit]
+
     async def _handle_code_intent(
         self,
         *,
@@ -1191,6 +1449,8 @@ class SearchService:
     ) -> List[SearchHit]:
         hits: List[SearchHit] = []
         for entity in nlu.extracted_codes:
+            if entity.is_schema_loaded is False:
+                continue
             if entity.vocabulary_id in {"DICOM_TAG", "DICOM_UID"}:
                 want_related = include_related or nlu.intent == NLUIntent.RELATED_LOOKUP
                 hit = await self.lookup_dicom(
@@ -1225,9 +1485,10 @@ class SearchService:
                 )
                 if seed is None:
                     continue
+                resolved_vocab = str(seed.properties.get("vocabulary") or entity.vocabulary_id)
                 related = await self.find_related_concepts(
-                    entity.vocabulary_id,
-                    entity.code,
+                    resolved_vocab,
+                    seed.coding.code,
                     direction=related_direction,
                     include_shared_attributes=include_shared_attributes,
                     valid_only=valid_only,
@@ -1253,9 +1514,10 @@ class SearchService:
                 )
                 if seed is None:
                     continue
+                resolved_vocab = str(seed.properties.get("vocabulary") or entity.vocabulary_id)
                 mapped = await self.crosswalk(
-                    entity.vocabulary_id,
-                    entity.code,
+                    resolved_vocab,
+                    seed.coding.code,
                     target_vocabularies=nlu.target_vocabularies or None,
                     limit=max(related_limit, limit),
                     test_id=test_id,
@@ -1270,11 +1532,17 @@ class SearchService:
                     include_related=False,
                     test_id=test_id,
                 )
+                resolved_vocab = (
+                    str(seed.properties.get("vocabulary") or entity.vocabulary_id)
+                    if seed is not None
+                    else entity.vocabulary_id
+                )
+                resolved_code = seed.coding.code if seed is not None else entity.code
                 if seed is not None:
                     hits.append(seed)
                 descendants = await self.expand_descendants(
-                    entity.vocabulary_id,
-                    entity.code,
+                    resolved_vocab,
+                    resolved_code,
                     max_depth=2,
                     valid_only=valid_only,
                     limit=max(limit - len(hits), 1),
@@ -1297,6 +1565,8 @@ class SearchService:
         limit: int,
         test_id: Optional[str],
         warnings: List[str],
+        precomputed_query_vec: Optional[List[float]] = None,
+        candidate_vec_cache: Optional[Dict[str, List[float]]] = None,
     ) -> List[SearchHit]:
         lucene_query = build_lucene_query(query_text)
         if not lucene_query:
@@ -1360,26 +1630,60 @@ class SearchService:
         vector_scores: Dict[str, float] = {}
         if rerank_with_embeddings and candidates:
             candidate_ids = list(candidates.keys())
-            attr_rows = await self.client.execute_query(
-                _HYDRATE_CONCEPT_ATTRS_CYPHER,
-                {"concept_ids": candidate_ids, "test_id": test_id},
+            missing_ids = (
+                [cid for cid in candidate_ids if cid not in candidate_vec_cache]
+                if candidate_vec_cache is not None
+                else candidate_ids
             )
-            attrs_by_id: Dict[str, List[str]] = {
-                str(r["id"]): [a for a in (r.get("attrs") or []) if a] for r in attr_rows
-            }
-            candidate_texts = [
-                _build_candidate_embedding_text(candidates[cid], attrs_by_id.get(cid, [])) for cid in candidate_ids
-            ]
-            vectors = await self._safe_embed_texts(
-                [query_text, *candidate_texts],
-                embedding_tag=embedding_tag,
-                warnings=warnings,
-            )
-            if vectors is not None and len(vectors) == len(candidate_ids) + 1:
-                query_vec = vectors[0]
-                for cid, cand_vec in zip(candidate_ids, vectors[1:]):
-                    vector_scores[cid] = cosine_similarity(query_vec, cand_vec)
-                    sources[cid].add(MatchSource.HYBRID)
+            attrs_by_id: Dict[str, List[str]] = {}
+            if missing_ids:
+                attr_rows = await self.client.execute_query(
+                    _HYDRATE_CONCEPT_ATTRS_CYPHER,
+                    {"concept_ids": missing_ids, "test_id": test_id},
+                )
+                attrs_by_id = {str(r["id"]): [a for a in (r.get("attrs") or []) if a] for r in attr_rows}
+
+            if precomputed_query_vec is not None:
+                query_vec: Optional[List[float]] = precomputed_query_vec
+                if missing_ids:
+                    missing_texts = [
+                        _build_candidate_embedding_text(candidates[cid], attrs_by_id.get(cid, []))
+                        for cid in missing_ids
+                    ]
+                    missing_vecs = await self._safe_embed_texts(
+                        missing_texts,
+                        embedding_tag=embedding_tag,
+                        warnings=warnings,
+                    )
+                    if missing_vecs is not None and len(missing_vecs) == len(missing_ids):
+                        for cid, cvec in zip(missing_ids, missing_vecs):
+                            if candidate_vec_cache is not None:
+                                candidate_vec_cache[cid] = cvec
+                            vector_scores[cid] = cosine_similarity(query_vec, cvec)
+                            sources[cid].add(MatchSource.HYBRID)
+                    else:
+                        query_vec = None
+                if query_vec is not None and candidate_vec_cache is not None:
+                    for cid in candidate_ids:
+                        if cid not in vector_scores and cid in candidate_vec_cache:
+                            vector_scores[cid] = cosine_similarity(query_vec, candidate_vec_cache[cid])
+                            sources[cid].add(MatchSource.HYBRID)
+            else:
+                candidate_texts = [
+                    _build_candidate_embedding_text(candidates[cid], attrs_by_id.get(cid, [])) for cid in candidate_ids
+                ]
+                vectors = await self._safe_embed_texts(
+                    [query_text, *candidate_texts],
+                    embedding_tag=embedding_tag,
+                    warnings=warnings,
+                )
+                if vectors is not None and len(vectors) == len(candidate_ids) + 1:
+                    q_vec_single = vectors[0]
+                    for cid, cand_vec in zip(candidate_ids, vectors[1:]):
+                        if candidate_vec_cache is not None:
+                            candidate_vec_cache[cid] = cand_vec
+                        vector_scores[cid] = cosine_similarity(q_vec_single, cand_vec)
+                        sources[cid].add(MatchSource.HYBRID)
 
         # Compute final fused scores
         hits: List[SearchHit] = []
@@ -1419,6 +1723,7 @@ class SearchService:
         limit: int,
         test_id: Optional[str],
         warnings: List[str],
+        precomputed_query_vec: Optional[List[float]] = None,
     ) -> List[SearchHit]:
         lucene_query = build_lucene_query(query_text)
         labels = [et.value for et in entity_types]
@@ -1470,13 +1775,17 @@ class SearchService:
 
         # 2) Precomputed HNSW Vector Index retrieval (embedding_vector_idx)
         if rerank_with_embeddings:
-            vectors = await self._safe_embed_texts([query_text], embedding_tag=embedding_tag, warnings=warnings)
-            if vectors is not None and vectors:
+            query_vec = precomputed_query_vec
+            if query_vec is None:
+                vectors = await self._safe_embed_texts([query_text], embedding_tag=embedding_tag, warnings=warnings)
+                if vectors is not None and vectors:
+                    query_vec = vectors[0]
+            if query_vec is not None:
                 vec_rows = await self.client.execute_query(
                     _DICOM_VECTOR_SEARCH_CYPHER,
                     {
                         "fetch_k": max(limit * 6, 48),
-                        "query_vec": vectors[0],
+                        "query_vec": query_vec,
                         "model_tag": embedding_tag,
                         "labels": labels,
                         "valid_only": valid_only,
@@ -1592,6 +1901,8 @@ class SearchService:
         test_id: Optional[str],
     ) -> None:
         for hit in hits:
+            if hit.related:
+                continue
             if hit.entity_type == SearchEntityType.CONCEPT and hit.properties.get("vocabulary"):
                 hit.related = await self.find_related_concepts(
                     str(hit.properties["vocabulary"]),
