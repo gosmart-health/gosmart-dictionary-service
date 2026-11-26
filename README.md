@@ -14,6 +14,7 @@ terminology resolution and enrichment.
 | Config      | [`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (`GOSMART_DS_*`) |
 | Logging     | [`structlog`](https://www.structlog.org/) + 7-day rotating JSON file logs |
 | LLM flows   | [`genkit`](https://python.api.genkit.dev/) (`genkit-ollama`, `genkit-google-genai`) |
+| NLU         | `gosmart-clinical-nlu` (spaCy `textcat` + `entity_ruler` intent plugin + Genkit query expansion) |
 | Graph store | [`neo4j`](https://neo4j.com/docs/python-manual/current/)         |
 | Concurrency | [`pykka`](https://pykka.readthedocs.io/) (Actor Model)           |
 | Docs site   | [`zensical`](https://zensical.org/) (`docs` dependency group)    |
@@ -27,8 +28,11 @@ terminology resolution and enrichment.
 
 ```
 gosmart-dictionary-service/
-├── pyproject.toml                     # Project metadata, dependencies, tool config
+├── pyproject.toml                     # Project metadata, dependencies, NLU entry points, tool config
 ├── .env.example                       # Sample GOSMART_DS_* configuration
+├── training/                          # spaCy NLU training corpus (`config.json`, `find_coding_schema/`)
+├── nlu_models/                        # Trained `gosmart-clinical-nlu` spaCy bundle (`intent_models.zip`)
+├── devop-scripts/                     # Operational scripts (`nlu-train.sh`)
 ├── notebooks/                         # Interactive Jupyter playgrounds (DICOM & Clinical Terms)
 ├── src/
 │   └── gosmart_dictionary_service/    # Importable package (src layout)
@@ -42,7 +46,8 @@ gosmart-dictionary-service/
 │       ├── actor/                     # Pykka ThreadingActors (DicomIngestionActor, ClinicalTermsIngestionActor, EmbeddingActor)
 │       ├── ingestor/                  # Batched Neo4j dictionary ingesters (DicomIngesterService, ClinicalTermsIngesterService)
 │       ├── model/                     # Pydantic domain models (System, Auth, LLM_Config, Embedding, Search, DICOM, Clinical)
-│       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding, Search, NLU stub)
+│       ├── nlu/                       # External `gosmart-clinical-nlu` intent specs (`find_coding_schema`)
+│       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding, Search, ClinicalNLU)
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (TestClient)
 │   ├── unit/                          # Unit tests
@@ -75,6 +80,10 @@ Configuration is loaded from `.env` (and environment variables prefixed with `GO
 | `GOSMART_DS_INFERENCE_SERVER_URL` | `http://localhost:11434` | Default Ollama/custom inference server URL |
 | `GOSMART_DS_INFERENCE_MODEL` | `gemma4:e2b` | Default inference model name |
 | `GOSMART_DS_INFERENCE_TAG` | `inference-v1` | Default `LLM_Config.tag` seeded for inference |
+| `GOSMART_DS_NLU_MODEL_PATH` | `./nlu_models/intent_models.zip` | Path to the trained `gosmart-clinical-nlu` spaCy model bundle |
+| `GOSMART_DS_NLU_LLM_EXPANSION_ENABLED` | `true` | Enable LLM alternate search phrase synthesis (`gemma4:e2b`) during NLU parsing |
+| `GOSMART_DS_NLU_MAX_ALTERNATE_PHRASES` | `3` | Maximum alternate clinical/DICOM search phrases synthesized per query |
+| `GOSMART_DS_NLU_SCHEMA_CACHE_TTL_SEC` | `60` | TTL (seconds) for caching active Neo4j loaded coding schemas during NLU schema checks |
 | `GOSMART_DS_VERTEX_AI_API_KEY` | *(unset)* | Optional Vertex AI / Google AI API key (referenced via `${GOSMART_DS_VERTEX_AI_API_KEY}`) |
 | `GOSMART_DS_VERTEX_AI_LOCATION` | `us-central1` | Default Google Cloud / Vertex AI region |
 | `GOSMART_DS_VERTEX_AI_PROJECT_ID` | *(unset)* | Optional Google Cloud Project ID for Vertex AI |
@@ -128,16 +137,41 @@ uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-term
 uv run gosmart-ds ingest-clinical-terms --source-dir ./data-source/clinical-terms --profile demo-core --bootstrap
 ```
 
-### Unified Search Service & Playgrounds
+### Training the spaCy NLU Model (`gosmart-clinical-nlu`)
 
-`SearchService` (`gosmart_dictionary_service.service.search_service`) exposes a unified NLU-guided `search(query: str, ...)` entrypoint (with `StubNLUService` implementing `NLUParserProtocol` pending migration of the trained `gosmart-graphite` NLU) alongside granular ontology primitives (`lookup_code`, `lookup_dicom`, `find_related_concepts`, `expand_descendants`, `crosswalk`, `subsumes`) and dual `fhir` / MCP `compact` wire projections:
+GoSmart DS registers the `find_coding_schema` intent plugin via the `gosmart_clinical_nlu.intents` entry point ([`src/gosmart_dictionary_service/nlu/find_coding_schema.py`](./src/gosmart_dictionary_service/nlu/find_coding_schema.py)) with training data under [`training/find_coding_schema/`](./training/find_coding_schema/):
+
+```bash
+# List discovered built-in and external intents
+uv run gosmart-clinical-nlu list-intents
+
+# Train the intent bundle into nlu_models/intent_models.zip
+./devop-scripts/nlu-train.sh
+
+# Inspect and smoke-test the trained bundle
+uv run gosmart-clinical-nlu inspect --model nlu_models/intent_models.zip
+uv run gosmart-clinical-nlu parse --model nlu_models/intent_models.zip "Look up DICOM (0008, 0010)"
+```
+
+### Unified Search & Clinical NLU Service
+
+`SearchService` ([`src/gosmart_dictionary_service/service/search_service.py`](./src/gosmart_dictionary_service/service/search_service.py)) pairs with `ClinicalNLUService` ([`src/gosmart_dictionary_service/service/nlu_service.py`](./src/gosmart_dictionary_service/service/nlu_service.py)) to run every query through a 5-stage grounded discovery pipeline:
+
+1. **Trained spaCy NLU Extraction**: Loads `nlu_models/intent_models.zip` via `gosmart-clinical-nlu` to extract coding schemas, clinical codes, DICOM tags, and DICOM UIDs, and dynamically alerts the caller via `SearchResponse.warnings` when a mentioned schema is not loaded in the active Neo4j database (e.g., demo subsets or unsupported schemas like `RxNorm`).
+2. **Deterministic Exact Hits (`score = 1.0`)**: Resolved codes/tags remain at the top of `hits` with `MatchSource.EXACT_CODE` (unknown codes in loaded schemas emit a warning and are skipped so raw numbers are never hallucinated).
+3. **Reverse-Lookup Query Rewriting**: Replaces extracted code spans in the query string with their human-readable Neo4j `Concept.display` / `DicomElement.name` (`nlu.rewritten_query`).
+4. **LLM Alternate Phrase Synthesis (`gemma4:e2b`)**: Uses the active `inference-v1` `LLM_Config` via Genkit (`expand_with_llm=True` by default, with graceful fallback if offline) to synthesize medical/DICOM synonyms (`nlu.synthesized_phrases`).
+5. **Discounted Hybrid Aggregation**: Executes Lucene full-text + HNSW/embedding vector search across both Clinical Concepts and DICOM entities for the rewritten query and synthesized phrases, aggregating discovered matches beneath deterministic hits at discounted probabilities (`<= 0.85`).
 
 ```python
 from gosmart_dictionary_service.model.search import ResponseFormat, SearchEntityType
 from gosmart_dictionary_service.service.search_service import search_service
 
-# Unified natural-language search (Lucene + 1-hop [:IS_A] parent convergence + on-the-fly embedding rerank)
+# Unified natural-language search (NLU + LLM expansion + Lucene + [:IS_A] convergence + embedding rerank)
 res = await search_service.search("acute pneumonia", entity_types=[SearchEntityType.CONCEPT])
+
+# Code lookup + automatic reverse-lookup & cross-domain (Clinical + DICOM) discovery
+disc = await search_service.search("LOINC 87279-6")
 
 # Forward + reverse + 2-hop shared-axis related concept aggregation
 rel = await search_service.search("Find something related to LOINC 87279-6")

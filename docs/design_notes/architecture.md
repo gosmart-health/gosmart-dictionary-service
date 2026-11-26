@@ -84,9 +84,10 @@ flowchart TD
 
     subgraph ServiceLayer["Core Services & Genkit Flows"]
         USER_SVC["Registrant Auth & API Key Service"]
+        NLU_SVC["Clinical NLU Service (spaCy + Reverse-Lookup + LLM Expansion)"]
         HYBRID["Hybrid Search Service (Exact + Fulltext + HNSW)"]
         GRAPH_SVC["Ontology Traversal & Crosswalk Service"]
-        GENKIT["Genkit Flows (Disambiguation & NL Grounding)"]
+        GENKIT["Genkit Flows (Phrase Synthesis & NL Grounding)"]
     end
 
     subgraph GraphStore["Standalone Neo4j Knowledge Graph (No PHI)"]
@@ -114,8 +115,9 @@ flowchart TD
     USER_SVC --> BREVO
     USER_SVC <--> USERS_CFG
     REST & MCP & CLI --> HYBRID & GRAPH_SVC & GENKIT
-    HYBRID & GRAPH_SVC --> GENKIT
-    CONCEPTS & ONTOLOGY & VEC_NODES --> HYBRID & GRAPH_SVC
+    HYBRID --> NLU_SVC
+    NLU_SVC & HYBRID & GRAPH_SVC --> GENKIT
+    CONCEPTS & ONTOLOGY & VEC_NODES --> NLU_SVC & HYBRID & GRAPH_SVC
     USERS_CFG --> AUTH_RL & GENKIT & EMB_ACT
 
     Sources --> ING_ACT
@@ -136,7 +138,8 @@ flowchart TD
 | **MCP Server** | `mcp` Python SDK | `StreamableHTTP`, `SSE`, and `STDIO` transports |
 | **CLI** | `typer` + `rich` | Entry points: `gosmart-dictionary-service`, `gosmart-ds` |
 | **Graph & Vector Store** | Standalone `neo4j` (`>=6.4`) | Dedicated non-PHI graph + Full-Text (Lucene) + native HNSW Vector Index |
-| **LLM & Embeddings** | `genkit` (`genkit-google-genai`, `genkit-ollama`) | Dynamic provider resolution via system `:LLM_Config` (Vertex AI / Gemini & Ollama) |
+| **Clinical NLU** | `gosmart-clinical-nlu` (spaCy `textcat` + `entity_ruler`) | Trained `find_coding_schema` bundle (`nlu_models/intent_models.zip`) + dynamic DB schema alerts |
+| **LLM & Embeddings** | `genkit` (`genkit-google-genai`, `genkit-ollama`) | Dynamic provider resolution via system `:LLM_Config` (`embedding-v1` & `inference-v1`, e.g. `gemma4:e2b`) |
 | **Offline GNN Pipeline** | PyTorch + PyTorch Geometric (`train` group) | Offline structural embedding job (runs on Apple M5 MPS or 6 GB CUDA GPU) |
 | **Concurrency** | `pykka` Actor Model | Non-blocking bulk terminology ingestion and background batch embedding |
 | **Configuration & Logs** | `pydantic-settings` (`GOSMART_DS_*`), `structlog` | `.env` + `tests/.env` resolution; rotating JSON/console logs |
@@ -356,14 +359,15 @@ All ingestors implement a common streaming/chunked pipeline: **Validate Source �
    - **`icd11_ingestor.py`** — Optional supplement for official WHO ICD-11 MMS linearization / ICD-API entities and post-coordination axes if newer than or omitted from an Athena export.
    - **`loinc_ingestor.py` / `snomed_ingestor.py`** — Optional native format enrichers (e.g., LOINC Radiology Playbook specifics or BioPortal SCTO / RF2 axioms not carried in Athena CSVs).
 
-### 5.2 Hybrid Resolution & Genkit Flows (`service/` & `flows/`)
+### 5.2 Hybrid Resolution, Clinical NLU & Genkit Expansion (`service/nlu_service.py` & `service/search_service.py`)
 
-To guarantee **zero hallucinated codes** while supporting natural conversational phrasing, natural-language resolution runs as a grounded multi-stage funnel:
+To guarantee **zero hallucinated codes** while aiding cross-domain discovery across Clinical Terminologies and DICOM, natural-language resolution runs as a 5-stage grounded funnel:
 
-1. **Stage 1 — Exact & Lexical Match:** Instant lookup if the input already matches a DICOM tag (`(0018,0050)` / `00180050`), DICOM keyword (`SliceThickness`), exact concept code, or high-scoring Neo4j Full-Text (Lucene BM25) match over `display` and `synonyms`.
-2. **Stage 2 — HNSW Semantic Vector Retrieval:** Embeds the normalized clinical phrase via `EmbeddingService` and queries `embedding_vector_idx` filtered by requested `vocabulary_id` / `domain_id` (e.g., `Condition` for FHIR `Condition.code`, `Measurement`/`Observation` for FHIR `Observation.code`, or `DicomElement` for DICOM lookup), deduplicating per target node.
-3. **Stage 3 — Graph Context Hydration:** Enriches top-`k` candidates with immediate `:IS_A` parents, standard `:MAPS_TO` equivalents, GNN structural similarity scores (when available), or DICOM Module/VR metadata.
-4. **Stage 4 — Genkit Disambiguation Flow (Optional / Ambiguity Triggered):** When multiple candidates score closely or conversational query decomposition is needed, a structured-output Genkit flow (`temperature=0.0`, strict Pydantic output schema) selects and ranks **only** from the retrieved candidate IDs.
+1. **Stage 1 — Trained spaCy NLU & Dynamic Schema Check (`ClinicalNLUService`):** Runs incoming queries through the trained `gosmart-clinical-nlu` (`find_coding_schema`) spaCy bundle (`GOSMART_DS_NLU_MODEL_PATH`, default `./nlu_models/intent_models.zip`) to extract `CODING_SCHEMA`, `CODING_CODE`, `DICOM_TAG`, and `DICOM_UID` spans, and inspects active Neo4j `:CodeSystem` / `:DicomElement` availability (cached for `GOSMART_DS_NLU_SCHEMA_CACHE_TTL_SEC` seconds) to alert users via `warnings` whenever an extracted schema is not loaded in the current database.
+2. **Stage 2 — Deterministic Exact Match (`score = 1.0`) & Reverse-Lookup Query Rewrite:** Resolves extracted codes/tags directly in Neo4j (`MatchSource.EXACT_CODE`, `score = 1.0`), replaces resolved code spans in the query string with their Neo4j `Concept.display` / `DicomElement.name` (`nlu.rewritten_query`), and strips unknown codes so unresolved raw numbers are never sent to the LLM.
+3. **Stage 3 — Genkit LLM Alternate Phrase Synthesis (`inference-v1` / `gemma4:e2b`):** Synthesizes up to `GOSMART_DS_NLU_MAX_ALTERNATE_PHRASES` concise clinical and DICOM alternate search phrases via Genkit (`GOSMART_DS_NLU_LLM_EXPANSION_ENABLED=true`, with graceful warning fallback if the inference provider is offline).
+4. **Stage 4 — Multi-Phrase Lucene + HNSW Semantic Vector Retrieval:** Batch-embeds the rewritten query and synthesized phrases via `EmbeddingService` (`embedding-v1`) and executes hybrid retrieval across both Clinical Concepts (Lucene `concept_fulltext_idx` + 1-hop `[:IS_A]` parent convergence + on-the-fly vector cosine rerank) and DICOM entities (Lucene `dicom_element_fulltext_idx` / `dicom_structure_fulltext_idx` + precomputed `embedding_vector_idx` HNSW search).
+5. **Stage 5 — Discounted Probability & Consensus Aggregation:** Retains deterministic code matches at `score = 1.0` and aggregates discovered Clinical + DICOM candidates beneath them at discounted probabilities (`0.78` weight / `0.85` cap for `rewritten_query` when exact hits exist; `0.68` weight / `0.78` cap with `MatchSource.LLM_EXPANSION` for synthesized phrases, plus a `+0.03` multi-phrase consensus boost).
 
 ### 5.3 API & MCP Interfaces (`api/v1/` & `service/mcp_service.py`)
 
