@@ -27,6 +27,9 @@ dependencies = [
 gosmart-dictionary-service = "gosmart_dictionary_service.__main__:main"
 gosmart-ds = "gosmart_dictionary_service.__main__:main"
 
+[project.entry-points."gosmart_clinical_nlu.intents"]
+find_coding_schema = "gosmart_dictionary_service.nlu.find_coding_schema:FIND_CODING_SCHEMA_SPEC"
+
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
@@ -70,4 +73,3 @@ known-first-party = ["gosmart_dictionary_service", "tests"]
 
 [tool.uv.sources]
 gosmart-clinical-nlu = { git = "https://github.com/gosmart-health/gosmart-clinical-nlu.git", rev = "main" }
-
