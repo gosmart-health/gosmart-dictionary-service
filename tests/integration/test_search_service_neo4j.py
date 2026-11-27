@@ -19,6 +19,7 @@ from gosmart_dictionary_service.model.search import (
     RelationDirection,
     SearchEntityType,
 )
+from gosmart_dictionary_service.service.chat_service import ChatRequest, DictionaryChatService
 from gosmart_dictionary_service.service.search_service import SearchService
 
 TEST_ID = "test_search_service_neo4j"
@@ -182,6 +183,34 @@ def test_search_service_isolated_graph_operations() -> None:
             assert rx_resp.total_hits == 0
             assert rx_resp.nlu.unsupported_vocabularies == ["RxNorm"]
             assert any("RxNorm" in w and "ICD10CM, LOINC, SNOMED" in w for w in rx_resp.warnings)
+
+            # Inspect entity neighborhood (powers /explore drill-down & future Graph UI)
+            nb = await svc.inspect_entity(vocabulary_id="LOINC", code="T-87279-6", test_id=TEST_ID)
+            assert nb is not None
+            assert nb.seed.coding.code == "T-87279-6"
+            assert len(nb.nodes) >= 4
+            assert len(nb.edges) >= 3
+
+            # Grounded DictionaryChatService end-to-end against isolated test_id graph
+            chat_svc = DictionaryChatService(
+                client=client,
+                search_service=svc,
+                generate_fn=lambda _sys, prompt, cfg: f"Grounded[{cfg.model}]: " + prompt.splitlines()[0],
+            )
+            chat_resp = await chat_svc.chat(
+                ChatRequest(
+                    message="Find something related to LOINC T-87279-6",
+                    include_context=True,
+                    include_related=True,
+                    test_id=TEST_ID,
+                )
+            )
+            assert chat_resp.nlu is not None
+            assert chat_resp.nlu.intent == "related_lookup"
+            assert len(chat_resp.citations) == 1
+            assert chat_resp.citations[0].identifier == "LOINC:T-87279-6"
+            assert chat_resp.citations[0].drilldown_url is not None
+            assert any(r.identifier == "LOINC:T-24627-2" for r in chat_resp.citations[0].related)
         finally:
             await client.close()
 

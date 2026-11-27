@@ -7,10 +7,12 @@
     <div>
       <h1 style="margin-bottom:0.2rem;">Dictionary AI Chat</h1>
       <p class="muted" style="margin:0;">
-        Ask natural-language questions about DICOM tags, keywords, VRs, CIODs, modules, and clinical coding.
+        Natural-language lookup, crosswalk, and ontology traversal across Clinical Terminologies
+        (SNOMED CT, LOINC, ICD-10-CM, UCUM) and the DICOM Standard.
       </p>
     </div>
-    <div>
+    <div class="btn-row">
+      <a href="/explore" class="btn btn-secondary btn-sm">Ontology Explorer</a>
       <span class="pill pill-info mono">{{ inference_provider }}/{{ inference_model }}</span>
     </div>
   </div>
@@ -23,33 +25,167 @@
     {% if messages %}
       {% for msg in messages %}
         <div class="chat-msg {% if msg.role == 'user' %}chat-msg-user{% else %}chat-msg-assistant{% endif %}">
-          <div>{{ msg.content }}</div>
-          {% if msg.citations %}
-            <div class="citation-list">
-              {% for c in msg.citations %}
-                <span class="citation-badge" title="{{ c.snippet or '' }}">
-                  {{ c.identifier }} · {{ c.keyword or c.name }}{% if c.vr %} · VR={{ c.vr }}{% endif %}
-                </span>
+          <div class="chat-msg-body">{{ msg.content }}</div>
+
+          {% if msg.nlu %}
+            <div class="chat-nlu-bar">
+              <span class="pill pill-info mono">{{ msg.nlu.intent | replace('_', ' ') | upper }}</span>
+              {% if msg.nlu.extracted_codes %}
+                <span>Codes: <strong class="mono">{{ msg.nlu.extracted_codes | join(', ') }}</strong></span>
+              {% endif %}
+              {% if msg.nlu.rewritten_query %}
+                <span>Rewritten: <em>"{{ msg.nlu.rewritten_query }}"</em></span>
+              {% endif %}
+              {% if msg.nlu.target_vocabularies %}
+                <span>Target: <strong>{{ msg.nlu.target_vocabularies | join(', ') }}</strong></span>
+              {% endif %}
+              {% if msg.search_duration_ms is not none %}
+                <span class="mono">{{ msg.search_duration_ms }} ms</span>
+              {% endif %}
+            </div>
+          {% endif %}
+
+          {% if msg.warnings %}
+            <div class="chat-warning-box" role="note">
+              {% for w in msg.warnings %}
+                <div>&#9888; {{ w }}</div>
               {% endfor %}
             </div>
           {% endif %}
+
+          {% if msg.citations %}
+            <details class="citation-drawer" data-is-last="{{ '1' if loop.last else '0' }}" open>
+              <summary class="citation-drawer-summary">
+                <span>Grounded Dictionary Results ({{ msg.citations | length }})</span>
+                <span class="muted">Click any code/tag to drill down</span>
+              </summary>
+              <div class="table-wrap citation-table-wrap">
+                <table class="citation-table">
+                  <thead>
+                    <tr>
+                      <th>Schema / Type</th>
+                      <th>Code / Tag</th>
+                      <th>Display / Name</th>
+                      <th>Details</th>
+                      <th>Score</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for c in msg.citations %}
+                      <tr>
+                        <td>
+                          <span class="pill pill-schema">
+                            {{ c.vocabulary or (c.entity_type | replace('Dicom', 'DICOM ')) }}
+                          </span>
+                        </td>
+                        <td class="mono">
+                          {% if c.drilldown_url %}
+                            <a href="{{ c.drilldown_url }}" class="drilldown-link">{{ c.identifier }}</a>
+                          {% else %}
+                            {{ c.identifier }}
+                          {% endif %}
+                        </td>
+                        <td>
+                          <div>
+                            <strong>{{ c.name }}</strong>
+                            {% if c.retired %}
+                              <span class="pill pill-revoked">Retired</span>
+                            {% endif %}
+                          </div>
+                          {% if c.snippet %}
+                            <div class="citation-subtext">{{ c.snippet }}</div>
+                          {% endif %}
+                          {% if c.related %}
+                            <div class="citation-related-inline">
+                              <span class="muted">Related:</span>
+                              {% for rel in c.related[:5] %}
+                                <a href="{{ rel.drilldown_url }}" class="citation-rel-chip" title="{{ rel.relationship_id }}: {{ rel.display }}">
+                                  {{ rel.relationship_id or rel.relation }} &rarr; {{ rel.identifier }}
+                                </a>
+                              {% endfor %}
+                            </div>
+                          {% endif %}
+                        </td>
+                        <td class="muted">
+                          {% if c.entity_type == 'Concept' %}
+                            {% if c.domain %}<div>Domain: {{ c.domain }}</div>{% endif %}
+                            {% if c.standard_concept == 'S' %}<div>Standard (S)</div>{% endif %}
+                          {% elif c.entity_type == 'DicomElement' %}
+                            {% if c.keyword %}<div class="mono">{{ c.keyword }}</div>{% endif %}
+                            <div>
+                              {% if c.vr %}VR={{ c.vr }}{% endif %}
+                              {% if c.vm %}{% if c.vr %} · {% endif %}VM={{ c.vm }}{% endif %}
+                            </div>
+                          {% else %}
+                            <div>{{ c.entity_type }}</div>
+                          {% endif %}
+                        </td>
+                        <td class="mono">
+                          {% if c.score is not none %}{{ "%.2f"|format(c.score) }}{% else %}&mdash;{% endif %}
+                          <div class="muted" style="font-size:0.74rem;">{{ c.source }}</div>
+                        </td>
+                        <td>
+                          <div class="citation-actions">
+                            {% if c.drilldown_url %}
+                              <a href="{{ c.drilldown_url }}" class="btn btn-secondary btn-xs">Drill Down</a>
+                            {% endif %}
+                            <button
+                              type="button"
+                              class="btn btn-secondary btn-xs"
+                              data-chat-prompt="Show related concepts and crosswalks for {{ c.identifier }} ({{ c.name }})"
+                            >Ask in Chat</button>
+                            {% if c.macro %}
+                              <button
+                                type="button"
+                                class="btn btn-secondary btn-xs"
+                                data-copy-text="{{ c.macro }}"
+                                title="{{ c.macro }}"
+                              >Copy Macro</button>
+                            {% endif %}
+                          </div>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          {% endif %}
+
           {% if msg.meta %}
             <div class="chat-msg-meta">{{ msg.meta }}</div>
           {% endif %}
         </div>
       {% endfor %}
     {% else %}
-      <p id="chat-empty-state" class="muted">
-        Try asking: <em>"What is DICOM tag (0018,0050) and its VR?"</em> or
-        <em>"Which DICOM attributes capture MR inversion time and echo time?"</em>
-      </p>
+      <div id="chat-empty-state" class="chat-empty-state">
+        <p class="muted" style="margin-top:0;">
+          Ask natural-language clinical or DICOM questions—codes are resolved deterministically, expanded via NLU,
+          and returned in a drill-down table below each answer:
+        </p>
+        <div class="chat-prompt-chips">
+          <button type="button" class="chat-prompt-chip" data-chat-prompt="What is DICOM tag (0018,0050) SliceThickness and which modules use it?">
+            DICOM (0018,0050) SliceThickness
+          </button>
+          <button type="button" class="chat-prompt-chip" data-chat-prompt="Look up LOINC 87279-6 and find related clinical &amp; DICOM concepts">
+            LOINC 87279-6 + related concepts
+          </button>
+          <button type="button" class="chat-prompt-chip" data-chat-prompt="Crosswalk ICD-10 J18.9 to SNOMED CT">
+            Crosswalk ICD-10 J18.9 &rarr; SNOMED
+          </button>
+          <button type="button" class="chat-prompt-chip" data-chat-prompt="Search standard clinical codes for acute pneumonia">
+            Search clinical codes: acute pneumonia
+          </button>
+        </div>
+      </div>
     {% endif %}
   </div>
 
   <form id="chat-form" method="post" action="/chat" data-api-url="{{ api_v1_prefix }}/chat">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
-    <div class="form-group" style="margin-bottom:0.5rem;">
+    <div class="form-group" style="margin-bottom:0.6rem;">
       <label for="chat-message">Your Question</label>
       <textarea
         id="chat-message"
@@ -57,18 +193,55 @@
         rows="3"
         required
         maxlength="4000"
-        placeholder="Ask about DICOM elements, modules, SOP classes, or clinical terminology..."
-      ></textarea>
+        placeholder="Ask about SNOMED, LOINC, ICD-10-CM, UCUM, or DICOM tags, modules, CIODs, and SOP classes..."
+      >{{ prefill_message }}</textarea>
+    </div>
+
+    <div class="chat-options-bar">
+      <div class="chat-option-item">
+        <label for="chat-scope" class="chat-inline-label">Scope:</label>
+        <select id="chat-scope" name="scope" class="chat-select">
+          {% if selected_scope == 'auto' %}
+            <option value="auto" selected>Auto (Clinical + DICOM)</option>
+          {% else %}
+            <option value="auto">Auto (Clinical + DICOM)</option>
+          {% endif %}
+          {% if selected_scope == 'clinical' %}
+            <option value="clinical" selected>Clinical Terms Only</option>
+          {% else %}
+            <option value="clinical">Clinical Terms Only</option>
+          {% endif %}
+          {% if selected_scope == 'dicom' %}
+            <option value="dicom" selected>DICOM Standard Only</option>
+          {% else %}
+            <option value="dicom">DICOM Standard Only</option>
+          {% endif %}
+        </select>
+      </div>
+
+      <label class="checkbox-row chat-checkbox-inline">
+        {% if include_context_checked %}
+          <input name="include_context" type="checkbox" checked>
+        {% else %}
+          <input name="include_context" type="checkbox">
+        {% endif %}
+        <span>Ground with Neo4j dictionary</span>
+      </label>
+
+      <label class="checkbox-row chat-checkbox-inline">
+        {% if include_related_checked %}
+          <input name="include_related" type="checkbox" checked>
+        {% else %}
+          <input name="include_related" type="checkbox">
+        {% endif %}
+        <span>Include related concepts</span>
+      </label>
     </div>
 
     <div class="chat-controls">
-      <label class="checkbox-row" for="chat-include-context">
-        <input id="chat-include-context" name="include_context" type="checkbox" checked>
-        <span>Ground answers with Neo4j DICOM dictionary retrieval</span>
-      </label>
+      <span id="chat-status" class="muted" aria-live="polite"></span>
 
       <div class="btn-row">
-        <span id="chat-status" class="muted" aria-live="polite"></span>
         <button id="chat-clear-btn" type="button" class="btn btn-secondary btn-sm">Clear</button>
         <button type="submit" class="btn btn-primary">Send</button>
       </div>

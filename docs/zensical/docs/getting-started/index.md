@@ -81,12 +81,13 @@ uv run gosmart-ds serve
   - Email Verification: <http://127.0.0.1:8081/verify-email>
   - Log In: <http://127.0.0.1:8081/login>
   - API Key Management: <http://127.0.0.1:8081/keys>
-  - Grounded Dictionary AI Chat: <http://127.0.0.1:8081/chat>
+  - Grounded Dictionary AI Chat: <http://127.0.0.1:8081/chat> (unified Clinical + DICOM NLU grounding with scope selector, related-concept toggle, and collapsible tabular FHIR citations)
+  - Ontology & Dictionary Explorer: <http://127.0.0.1:8081/explore> (entity drill-down inspector with FHIR coding macros, categorized relationship tables, and Graph-UI-ready neighborhood JSON)
 - **REST API & Docs**:
   - Interactive API docs: <http://127.0.0.1:8081/docs>
   - Health endpoint: <http://127.0.0.1:8081/api/v1/health>
   - Auth & API Keys: `/api/v1/auth/register`, `/api/v1/auth/verify-email`, `/api/v1/auth/login`, `/api/v1/auth/me`, `/api/v1/auth/keys`
-  - AI Chat: `POST /api/v1/chat` (authenticated via session cookie, JWT Bearer token, or `X-API-Key`)
+  - AI Chat: `POST /api/v1/chat` (supports `scope` = `auto` | `clinical` | `dicom`, `include_related`, NLU routing metadata, warnings, and drill-down citations; authenticated via session cookie, JWT Bearer token, or `X-API-Key`)
 
 The template requests in `test_main.http` can be run from the IDE HTTP client
 against a running server.

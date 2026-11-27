@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if seed_citation %}{{ seed_citation.identifier }} — Ontology Explorer — {{ app_name }}{% else %}Ontology Explorer — {{ app_name }}{% endif %}
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="chat-header">
+    <div>
+      <h1 style="margin-bottom:0.2rem;">Ontology &amp; Dictionary Explorer</h1>
+      <p class="muted" style="margin:0;">
+        Search or drill down into any Clinical Concept or DICOM Standard entity to inspect FHIR coding macros and graph relationships.
+      </p>
+    </div>
+    <div class="btn-row">
+      <a href="/chat" class="btn btn-secondary btn-sm">&larr; AI Chat</a>
+    </div>
+  </div>
+
+  <form method="get" action="/explore" class="explore-search-bar">
+    <input
+      type="text"
+      name="q"
+      value="{{ query_text }}"
+      placeholder="Search clinical terms, codes, or DICOM tags (e.g. LOINC 87279-6, acute pneumonia, (0018,0050), image-plane)..."
+      aria-label="Search dictionary entities"
+    >
+    <select name="scope" class="chat-select" aria-label="Search scope">
+      {% if selected_scope == 'auto' %}
+        <option value="auto" selected>Auto (Clinical + DICOM)</option>
+      {% else %}
+        <option value="auto">Auto (Clinical + DICOM)</option>
+      {% endif %}
+      {% if selected_scope == 'clinical' %}
+        <option value="clinical" selected>Clinical Terms Only</option>
+      {% else %}
+        <option value="clinical">Clinical Terms Only</option>
+      {% endif %}
+      {% if selected_scope == 'dicom' %}
+        <option value="dicom" selected>DICOM Standard Only</option>
+      {% else %}
+        <option value="dicom">DICOM Standard Only</option>
+      {% endif %}
+    </select>
+    <button type="submit" class="btn btn-primary">Search</button>
+  </form>
+
+  {% if error %}
+    <div class="alert alert-error" role="alert" style="margin-top:1rem;margin-bottom:0;">{{ error }}</div>
+  {% endif %}
+
+  {% if warnings %}
+    <div class="chat-warning-box" role="note" style="margin-top:0.85rem;">
+      {% for w in warnings %}
+        <div>&#9888; {{ w }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</section>
+
+{% if seed and seed_citation %}
+  <section class="card">
+    <div class="explore-entity-header">
+      <div>
+        <div class="btn-row" style="margin-bottom:0.45rem;">
+          <span class="pill pill-schema">
+            {{ seed_citation.vocabulary or (seed_citation.entity_type | replace('Dicom', 'DICOM ')) }}
+          </span>
+          <span class="mono" style="font-weight:700;font-size:1rem;">{{ seed_citation.identifier }}</span>
+          {% if seed_citation.retired %}
+            <span class="pill pill-revoked">Deprecated / Retired</span>
+          {% else %}
+            <span class="pill pill-active">Active</span>
+          {% endif %}
+          <span class="pill pill-info" title="Graph neighborhood ready for interactive visualization">
+            Graph Neighborhood: {{ graph_node_count }} node{% if graph_node_count != 1 %}s{% endif %} · {{ graph_edge_count }} edge{% if graph_edge_count != 1 %}s{% endif %}
+          </span>
+        </div>
+        <h2 style="margin-bottom:0.25rem;">{{ seed_citation.name }}</h2>
+        <div class="muted mono" style="font-size:0.8rem;">UUIDv5: {{ seed.id }}</div>
+      </div>
+
+      <div class="btn-row">
+        {% if ask_chat_url %}
+          <a href="{{ ask_chat_url }}" class="btn btn-primary btn-sm">Ask AI Chat about this entity &rarr;</a>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="kv-grid">
+      <div class="kv-item">
+        <div class="kv-label">Entity Label</div>
+        <div class="kv-value mono">{{ seed.entity_type.value }}</div>
+      </div>
+      <div class="kv-item">
+        <div class="kv-label">CodeSystem URI</div>
+        <div class="kv-value mono">{{ seed.coding.system or "—" }}</div>
+      </div>
+      <div class="kv-item">
+        <div class="kv-label">Canonical Code</div>
+        <div class="kv-value mono">{{ seed.coding.code }}</div>
+      </div>
+
+      {% if seed.entity_type.value == 'Concept' %}
+        <div class="kv-item">
+          <div class="kv-label">Vocabulary</div>
+          <div class="kv-value">{{ seed.properties.get('vocabulary') or "—" }}</div>
+        </div>
+        <div class="kv-item">
+          <div class="kv-label">Domain</div>
+          <div class="kv-value">{{ seed.properties.get('domain') or "—" }}</div>
+        </div>
+        <div class="kv-item">
+          <div class="kv-label">Concept Class</div>
+          <div class="kv-value">{{ seed.properties.get('concept_class') or "—" }}</div>
+        </div>
+        <div class="kv-item">
+          <div class="kv-label">Standard Concept</div>
+          <div class="kv-value">{{ seed.properties.get('standard') or "Non-standard" }}</div>
+        </div>
+        {% if seed.properties.get('athena_concept_id') is not none %}
+          <div class="kv-item">
+            <div class="kv-label">Athena Concept ID</div>
+            <div class="kv-value mono">{{ seed.properties.get('athena_concept_id') }}</div>
+          </div>
+        {% endif %}
+      {% else %}
+        {% if seed.properties.get('tag') %}
+          <div class="kv-item">
+            <div class="kv-label">DICOM Tag</div>
+            <div class="kv-value mono">{{ seed.properties.get('tag') }}</div>
+          </div>
+        {% endif %}
+        {% if seed.properties.get('keyword') %}
+          <div class="kv-item">
+            <div class="kv-label">Keyword</div>
+            <div class="kv-value mono">{{ seed.properties.get('keyword') }}</div>
+          </div>
+        {% endif %}
+        {% if seed.properties.get('vr') %}
+          <div class="kv-item">
+            <div class="kv-label">Value Representation (VR)</div>
+            <div class="kv-value mono">{{ seed.properties.get('vr') }}</div>
+          </div>
+        {% endif %}
+        {% if seed.properties.get('vm') %}
+          <div class="kv-item">
+            <div class="kv-label">Value Multiplicity (VM)</div>
+            <div class="kv-value mono">{{ seed.properties.get('vm') }}</div>
+          </div>
+        {% endif %}
+        {% if seed.properties.get('ciod_name') %}
+          <div class="kv-item">
+            <div class="kv-label">Implemented CIOD</div>
+            <div class="kv-value">{{ seed.properties.get('ciod_name') }}</div>
+          </div>
+        {% endif %}
+        {% if seed.properties.get('modality') %}
+          <div class="kv-item">
+            <div class="kv-label">Modality</div>
+            <div class="kv-value mono">{{ seed.properties.get('modality') }}</div>
+          </div>
+        {% endif %}
+        {% if seed.properties.get('basic_profile') %}
+          <div class="kv-item">
+            <div class="kv-label">PS3.15 Basic Profile</div>
+            <div class="kv-value mono">{{ seed.properties.get('basic_profile') }}</div>
+          </div>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    {% if seed.properties.get('definition') or seed.properties.get('description') %}
+      <div style="margin-top:1rem;">
+        <div class="kv-label">Normative Description / Definition</div>
+        <p style="margin:0.3rem 0 0 0;">{{ seed.properties.get('definition') or seed.properties.get('description') }}</p>
+      </div>
+    {% endif %}
+
+    {% if seed.properties.get('synonyms') %}
+      <div style="margin-top:0.85rem;">
+        <div class="kv-label">Synonyms</div>
+        <p class="muted" style="margin:0.25rem 0 0 0;">{{ seed.properties.get('synonyms') | join(' · ') }}</p>
+      </div>
+    {% endif %}
+
+    <div style="margin-top:1.15rem;">
+      <div class="kv-label">GoSmart Coding Macro (<code class="mono">system|code|display</code>)</div>
+      <div class="secret-box" style="margin-top:0.35rem;">
+        <code id="explore-coding-macro">{{ seed.macro }}</code>
+        <button type="button" class="btn btn-secondary btn-sm" data-copy-target="explore-coding-macro">Copy Macro</button>
+      </div>
+    </div>
+
+    {% if fhir_coding_json %}
+      <details style="margin-top:0.5rem;">
+        <summary class="muted" style="cursor:pointer;font-weight:600;">View FHIR Coding JSON</summary>
+        <pre class="code-block" style="margin-top:0.5rem;">{{ fhir_coding_json }}</pre>
+      </details>
+    {% endif %}
+
+    {% if graph_payload_json %}
+      <div id="entity-graph-data" hidden data-graph-payload="{{ graph_payload_json }}"></div>
+    {% endif %}
+  </section>
+
+  {% if relation_groups %}
+    {% for group in relation_groups %}
+      <section class="card">
+        <h2 style="margin-bottom:0.2rem;">{{ group.title }} ({{ group.rows | length }})</h2>
+        <p class="muted" style="margin-top:0;margin-bottom:0.85rem;">{{ group.subtitle }}</p>
+        <div class="table-wrap">
+          <table class="citation-table">
+            <thead>
+              <tr>
+                <th>Relationship</th>
+                <th>Schema / Type</th>
+                <th>Code / Tag</th>
+                <th>Display / Name</th>
+                <th>Details</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in group.rows %}
+                <tr>
+                  <td>
+                    <span class="mono" style="font-weight:600;">{{ row.predicate }}</span>
+                    <div class="muted" style="font-size:0.75rem;">{{ row.direction }}</div>
+                  </td>
+                  <td><span class="pill pill-schema">{{ row.schema_badge }}</span></td>
+                  <td class="mono">
+                    <a href="{{ row.drilldown_url }}" class="drilldown-link">{{ row.identifier }}</a>
+                  </td>
+                  <td>
+                    <strong>{{ row.display }}</strong>
+                    {% if row.deprecated %}
+                      <span class="pill pill-revoked">Deprecated</span>
+                    {% endif %}
+                  </td>
+                  <td class="muted">{{ row.details or "—" }}</td>
+                  <td>
+                    <div class="citation-actions">
+                      <a href="{{ row.drilldown_url }}" class="btn btn-secondary btn-xs">Drill Down</a>
+                      <a href="{{ row.ask_chat_url }}" class="btn btn-secondary btn-xs">Ask in Chat</a>
+                      {% if row.macro %}
+                        <button
+                          type="button"
+                          class="btn btn-secondary btn-xs"
+                          data-copy-text="{{ row.macro }}"
+                          title="{{ row.macro }}"
+                        >Copy Macro</button>
+                      {% endif %}
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endfor %}
+  {% else %}
+    <section class="card">
+      <p class="muted" style="margin:0;">
+        No 1-hop or 2-hop ontology relationships were found for this entity in the active Neo4j database.
+      </p>
+    </section>
+  {% endif %}
+
+{% elif search_hits %}
+  <section class="card">
+    <div class="chat-header" style="margin-bottom:0.75rem;">
+      <h2 style="margin:0;">Search Results ({{ search_hits | length }})</h2>
+      {% if search_nlu %}
+        <div class="chat-nlu-bar" style="margin:0;">
+          <span class="pill pill-info mono">{{ search_nlu.intent | replace('_', ' ') | upper }}</span>
+          {% if search_nlu.rewritten_query %}
+            <span>Rewritten: <em>"{{ search_nlu.rewritten_query }}"</em></span>
+          {% endif %}
+          <span class="mono">{{ search_nlu.duration_ms }} ms</span>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="table-wrap">
+      <table class="citation-table">
+        <thead>
+          <tr>
+            <th>Schema / Type</th>
+            <th>Code / Tag</th>
+            <th>Display / Name</th>
+            <th>Details</th>
+            <th>Score</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in search_hits %}
+            <tr>
+              <td>
+                <span class="pill pill-schema">
+                  {{ c.vocabulary or (c.entity_type | replace('Dicom', 'DICOM ')) }}
+                </span>
+              </td>
+              <td class="mono">
+                <a href="{{ c.drilldown_url }}" class="drilldown-link">{{ c.identifier }}</a>
+              </td>
+              <td>
+                <strong>{{ c.name }}</strong>
+                {% if c.retired %}<span class="pill pill-revoked">Retired</span>{% endif %}
+                {% if c.snippet %}<div class="citation-subtext">{{ c.snippet }}</div>{% endif %}
+              </td>
+              <td class="muted">
+                {% if c.entity_type == 'Concept' %}
+                  {% if c.domain %}Domain: {{ c.domain }}{% endif %}
+                  {% if c.standard_concept == 'S' %} · Standard (S){% endif %}
+                {% elif c.entity_type == 'DicomElement' %}
+                  {% if c.keyword %}{{ c.keyword }} · {% endif %}
+                  {% if c.vr %}VR={{ c.vr }}{% endif %}
+                  {% if c.vm %} · VM={{ c.vm }}{% endif %}
+                {% else %}
+                  {{ c.entity_type }}
+                {% endif %}
+              </td>
+              <td class="mono">
+                {% if c.score is not none %}{{ "%.2f"|format(c.score) }}{% else %}&mdash;{% endif %}
+                <div class="muted" style="font-size:0.74rem;">{{ c.source }}</div>
+              </td>
+              <td>
+                <div class="citation-actions">
+                  <a href="{{ c.drilldown_url }}" class="btn btn-primary btn-xs">Drill Down</a>
+                  {% if c.macro %}
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-xs"
+                      data-copy-text="{{ c.macro }}"
+                      title="{{ c.macro }}"
+                    >Copy Macro</button>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+{% elif query_text and not error %}
+  <section class="card">
+    <p class="muted" style="margin:0;">
+      No dictionary entities matched <strong>"{{ query_text }}"</strong>. Try a broader clinical phrase, code, or DICOM keyword.
+    </p>
+  </section>
+
+{% elif not error %}
+  <section class="card">
+    <p class="muted" style="margin-top:0;">
+      Enter a natural-language query, clinical code, or DICOM tag above—or click any code in
+      <a href="/chat">AI Chat</a>—to inspect its full metadata and ontology neighborhood.
+    </p>
+  </section>
+{% endif %}
+{% endblock %}

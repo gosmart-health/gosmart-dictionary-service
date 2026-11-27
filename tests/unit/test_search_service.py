@@ -14,6 +14,7 @@ from gosmart_dictionary_service.model.search import (
     RelationDirection,
     ResponseFormat,
     SearchEntityType,
+    build_drilldown_url,
     normalize_entity_types,
 )
 from gosmart_dictionary_service.service.nlu_service import ClinicalNLUService
@@ -492,3 +493,99 @@ def test_unknown_code_and_unloaded_schema_guardrails_in_search_service() -> None
     assert resp_unloaded.total_hits == 0
     assert resp_unloaded.nlu.unsupported_vocabularies == ["SNOMED"]
     assert any("SNOMED" in w and "DICOM, LOINC" in w for w in resp_unloaded.warnings)
+
+
+def test_inspect_entity_builds_neighborhood_nodes_and_edges_for_concept_and_dicom() -> None:
+    fake_client = _FakeNeo4jClient(
+        {
+            "MATCH (c:Concept {id: $node_id})": [
+                {
+                    "id": "uuid-loinc-87279-6",
+                    "vocabulary_id": "LOINC",
+                    "code": "87279-6",
+                    "display": "CT Chest for screening",
+                    "system_uri": "http://loinc.org",
+                    "coding_macro": "http://loinc.org|87279-6|CT Chest for screening",
+                    "domain_id": "Measurement",
+                    "concept_class_id": "Rad",
+                    "standard_concept": "S",
+                    "invalid_reason": None,
+                    "is_deprecated": False,
+                    "synonyms": ["Screening chest CT"],
+                }
+            ],
+            "RETURN dst.id AS id": [
+                {
+                    "id": "uuid-snomed-169069000",
+                    "rel_type": "MAPS_TO",
+                    "relationship_id": "Maps to",
+                    "equivalence": "equivalent",
+                    "vocabulary_id": "SNOMED",
+                    "code": "169069000",
+                    "display": "Computed tomography of chest",
+                    "system_uri": "http://snomed.info/sct",
+                    "coding_macro": "http://snomed.info/sct|169069000|Computed tomography of chest",
+                    "domain_id": "Procedure",
+                    "concept_class_id": "Procedure",
+                    "standard_concept": "S",
+                    "invalid_reason": None,
+                }
+            ],
+            "n.ciod_id = $code": [
+                {
+                    "id": "uuid-mod-image-plane",
+                    "entity_type": "DicomModule",
+                    "code": "image-plane",
+                    "name": "Image Plane",
+                    "description": "Specifies spatial orientation of slices.",
+                    "system_uri": "http://gosmart.health/terminology/dicom-module",
+                }
+            ],
+            "IMPLEMENTS_CIOD": [
+                {
+                    "id": "uuid-elem-00180050",
+                    "entity_type": "DicomElement",
+                    "direction": "forward",
+                    "relationship_id": "USES_ELEMENT",
+                    "code": "00180050",
+                    "display": "Slice Thickness",
+                    "system_uri": "http://gosmart.health/terminology/dicom-tag",
+                    "extra_props": {
+                        "tag": "(0018,0050)",
+                        "keyword": "SliceThickness",
+                        "vr": "DS",
+                        "requirement_type": "2",
+                    },
+                }
+            ],
+        }
+    )
+    svc = SearchService(client=fake_client, embedding_service=_FakeEmbeddingService())  # type: ignore[arg-type]
+
+    # 1) Inspect Clinical Concept by deterministic UUIDv5 id
+    concept_nb = svc.inspect_entity_sync(node_id="uuid-loinc-87279-6")
+    assert concept_nb is not None
+    assert concept_nb.seed.coding.code == "87279-6"
+    assert "id=uuid-loinc-87279-6" in concept_nb.drilldown_url
+    assert len(concept_nb.nodes) == 2
+    assert len(concept_nb.edges) == 1
+    assert concept_nb.edges[0].source_id == "uuid-loinc-87279-6"
+    assert concept_nb.edges[0].target_id == "uuid-snomed-169069000"
+    assert concept_nb.edges[0].predicate == "Maps to"
+
+    # 2) Inspect DICOM Module by entity_type + code
+    mod_nb = svc.inspect_entity_sync(entity_type=SearchEntityType.DICOM_MODULE, code="image-plane")
+    assert mod_nb is not None
+    assert mod_nb.seed.entity_type == SearchEntityType.DICOM_MODULE
+    assert mod_nb.seed.coding.code == "image-plane"
+    assert len(mod_nb.nodes) == 2
+    assert len(mod_nb.edges) == 1
+    assert mod_nb.edges[0].predicate == "USES_ELEMENT"
+    assert mod_nb.edges[0].properties.get("requirement_type") == "2"
+
+    # 3) Drilldown URL helper formatting
+    url = build_drilldown_url(
+        node_id="abc-123", entity_type=SearchEntityType.CONCEPT, vocabulary="LOINC", code="87279-6"
+    )
+    assert url.startswith("/explore?")
+    assert "vocab=LOINC" in url
