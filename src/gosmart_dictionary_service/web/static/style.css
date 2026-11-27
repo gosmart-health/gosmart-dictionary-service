@@ -97,7 +97,7 @@ a:hover {
   gap: 0.5rem 1rem;
 }
 
-.nav-links a {
+.nav-links a:not(.btn) {
   color: var(--text-muted);
   font-weight: 500;
   font-size: 0.94rem;
@@ -105,8 +105,8 @@ a:hover {
   border-radius: 4px;
 }
 
-.nav-links a.active,
-.nav-links a:hover {
+.nav-links a:not(.btn).active,
+.nav-links a:not(.btn):hover {
   color: var(--primary);
   text-decoration: none;
 }
