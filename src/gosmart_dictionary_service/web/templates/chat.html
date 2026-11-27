@@ -239,11 +239,13 @@
     </div>
 
     <div class="chat-controls">
-      <span id="chat-status" class="muted" aria-live="polite"></span>
+      <span id="chat-status" class="muted chat-status-indicator" role="status" aria-live="polite"></span>
 
       <div class="btn-row">
         <button id="chat-clear-btn" type="button" class="btn btn-secondary btn-sm">Clear</button>
-        <button type="submit" class="btn btn-primary">Send</button>
+        <button id="chat-submit-btn" type="submit" class="btn btn-primary">
+          <span class="btn-label">Send</span>
+        </button>
       </div>
     </div>
   </form>

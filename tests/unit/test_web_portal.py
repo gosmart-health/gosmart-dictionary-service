@@ -451,3 +451,75 @@ def test_chat_nlu_warnings_and_explore_entity_drilldown_page(
     assert "CT Chest for screening" in rich_post.text
     assert "RXNORM" in rich_post.text
     assert "SNOMED:169069000" in rich_post.text
+
+
+def test_explore_and_chat_loading_indicator_markup_and_assets(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_services(monkeypatch, dev_mode=True)
+
+    # Authenticate a modular test user so /explore and /chat render HTML
+    reg_csrf = _extract_csrf(client.get("/register").text)
+    reg_ok = client.post(
+        "/register",
+        data={
+            "email": "spinner-check@example.org",
+            "display_name": "Spinner Check",
+            "password": "StrongPassword123!",
+            "password_confirm": "StrongPassword123!",
+            "terms_accepted": "on",
+            "csrf_token": reg_csrf,
+        },
+    )
+    verify_match = re.search(r"/verify-email\?token=([A-Za-z0-9_\-]+)", reg_ok.text)
+    assert verify_match is not None
+    client.get(verify_match.group(0))
+    login_csrf = _extract_csrf(client.get("/login").text)
+    client.post(
+        "/login",
+        data={
+            "email": "spinner-check@example.org",
+            "password": "StrongPassword123!",
+            "next_url": "/explore",
+            "csrf_token": login_csrf,
+        },
+        follow_redirects=False,
+    )
+
+    # /explore renders form hooks, submit button ID, and hidden live status bar
+    explore_page = client.get("/explore")
+    assert explore_page.status_code == 200
+    assert 'id="explore-search-form"' in explore_page.text
+    assert 'id="explore-search-btn"' in explore_page.text
+    assert 'id="explore-status"' in explore_page.text
+    assert 'id="explore-status-text"' in explore_page.text
+    assert 'role="status"' in explore_page.text
+    assert 'aria-live="polite"' in explore_page.text
+    assert "loading-spinner" in explore_page.text
+
+    # /chat renders submit button ID and spinner-ready status region
+    chat_page = client.get("/chat")
+    assert chat_page.status_code == 200
+    assert 'id="chat-submit-btn"' in chat_page.text
+    assert 'id="chat-status"' in chat_page.text
+    assert "chat-status-indicator" in chat_page.text
+    assert 'role="status"' in chat_page.text
+
+    # Static CSS defines disabled button styling, spinner keyframes, and status bar classes
+    css = client.get("/static/style.css")
+    assert css.status_code == 200
+    assert ".btn:disabled" in css.text
+    assert "@keyframes gosmart-spin" in css.text
+    assert ".loading-spinner" in css.text
+    assert ".search-status-bar" in css.text
+    assert ".chat-status-indicator" in css.text
+
+    # Static JS defines Explorer + Chat loading helpers and bfcache pageshow reset
+    js = client.get("/static/portal.js")
+    assert js.status_code == 200
+    assert "initExploreSearch" in js.text
+    assert "initChatForm" in js.text
+    assert "setButtonLoading" in js.text
+    assert "createStageTicker" in js.text
+    assert 'addEventListener("pageshow"' in js.text

@@ -17,15 +17,16 @@
     </div>
   </div>
 
-  <form method="get" action="/explore" class="explore-search-bar">
+  <form id="explore-search-form" method="get" action="/explore" class="explore-search-bar">
     <input
+      id="explore-query"
       type="text"
       name="q"
       value="{{ query_text }}"
       placeholder="Search clinical terms, codes, or DICOM tags (e.g. LOINC 87279-6, acute pneumonia, (0018,0050), image-plane)..."
       aria-label="Search dictionary entities"
     >
-    <select name="scope" class="chat-select" aria-label="Search scope">
+    <select id="explore-scope" name="scope" class="chat-select" aria-label="Search scope">
       {% if selected_scope == 'auto' %}
         <option value="auto" selected>Auto (Clinical + DICOM)</option>
       {% else %}
@@ -42,8 +43,15 @@
         <option value="dicom">DICOM Standard Only</option>
       {% endif %}
     </select>
-    <button type="submit" class="btn btn-primary">Search</button>
+    <button id="explore-search-btn" type="submit" class="btn btn-primary">
+      <span class="btn-label">Search</span>
+    </button>
   </form>
+
+  <div id="explore-status" class="search-status-bar" role="status" aria-live="polite" hidden>
+    <span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span>
+    <span id="explore-status-text"></span>
+  </div>
 
   {% if error %}
     <div class="alert alert-error" role="alert" style="margin-top:1rem;margin-bottom:0;">{{ error }}</div>
