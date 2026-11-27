@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Register — {{ app_name }}{% endblock %}
+{% block container_class %}container-narrow{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Create an Account</h1>
+  <p class="muted">
+    Register for self-service API keys and access to the grounded Dictionary AI Chat.
+  </p>
+
+  {% if error %}
+    <div class="alert alert-error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if success %}
+    <div class="alert alert-success" role="status">
+      <strong>Registration submitted.</strong> {{ success }}
+    </div>
+  {% endif %}
+
+  {% if dev_verification_url %}
+    <div class="alert alert-warn" role="note">
+      <strong>DEV_MODE Local Verification Link</strong><br>
+      <span class="muted">Because <code>GOSMART_DS_BREVO_API_KEY</code> is unset in development mode, click below to verify locally:</span>
+      <div style="margin-top:0.5rem;">
+        <a href="{{ dev_verification_url }}" class="btn btn-primary btn-sm">Verify Email Now</a>
+      </div>
+      <div class="mono" style="margin-top:0.45rem;word-break:break-all;">{{ dev_verification_url }}</div>
+    </div>
+  {% endif %}
+
+  <form method="post" action="/register">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="form-group">
+      <label for="display_name">Full Name</label>
+      <input
+        id="display_name"
+        name="display_name"
+        type="text"
+        maxlength="120"
+        placeholder="Dr. Jane Doe"
+        value="{{ form_display_name }}"
+      >
+    </div>
+
+    <div class="form-group">
+      <label for="email">Email Address</label>
+      <input
+        id="email"
+        name="email"
+        type="email"
+        required
+        autocomplete="email"
+        placeholder="you@example.org"
+        value="{{ form_email }}"
+      >
+    </div>
+
+    <div class="form-group">
+      <label for="password">Password (min 8 characters)</label>
+      <input
+        id="password"
+        name="password"
+        type="password"
+        required
+        minlength="8"
+        maxlength="128"
+        autocomplete="new-password"
+      >
+    </div>
+
+    <div class="form-group">
+      <label for="password_confirm">Confirm Password</label>
+      <input
+        id="password_confirm"
+        name="password_confirm"
+        type="password"
+        required
+        minlength="8"
+        maxlength="128"
+        autocomplete="new-password"
+      >
+    </div>
+
+    <div class="form-group">
+      <label class="checkbox-row" for="terms_accepted">
+        <input id="terms_accepted" name="terms_accepted" type="checkbox" required>
+        <span>
+          I accept the GoSmart Health Dictionary Service terms of use and standard
+          clinical/DICOM terminology attribution requirements.
+        </span>
+      </label>
+    </div>
+
+    <div class="btn-row">
+      <button type="submit" class="btn btn-primary">Register Account</button>
+      <a href="/login" class="btn btn-secondary">Already have an account?</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

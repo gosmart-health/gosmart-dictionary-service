@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}AI Chat — {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="chat-header">
+    <div>
+      <h1 style="margin-bottom:0.2rem;">Dictionary AI Chat</h1>
+      <p class="muted" style="margin:0;">
+        Ask natural-language questions about DICOM tags, keywords, VRs, CIODs, modules, and clinical coding.
+      </p>
+    </div>
+    <div>
+      <span class="pill pill-info mono">{{ inference_provider }}/{{ inference_model }}</span>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="alert alert-error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  <div id="chat-log" class="chat-log" aria-live="polite">
+    {% if messages %}
+      {% for msg in messages %}
+        <div class="chat-msg {% if msg.role == 'user' %}chat-msg-user{% else %}chat-msg-assistant{% endif %}">
+          <div>{{ msg.content }}</div>
+          {% if msg.citations %}
+            <div class="citation-list">
+              {% for c in msg.citations %}
+                <span class="citation-badge" title="{{ c.snippet or '' }}">
+                  {{ c.identifier }} · {{ c.keyword or c.name }}{% if c.vr %} · VR={{ c.vr }}{% endif %}
+                </span>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% if msg.meta %}
+            <div class="chat-msg-meta">{{ msg.meta }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% else %}
+      <p id="chat-empty-state" class="muted">
+        Try asking: <em>"What is DICOM tag (0018,0050) and its VR?"</em> or
+        <em>"Which DICOM attributes capture MR inversion time and echo time?"</em>
+      </p>
+    {% endif %}
+  </div>
+
+  <form id="chat-form" method="post" action="/chat" data-api-url="{{ api_v1_prefix }}/chat">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="form-group" style="margin-bottom:0.5rem;">
+      <label for="chat-message">Your Question</label>
+      <textarea
+        id="chat-message"
+        name="message"
+        rows="3"
+        required
+        maxlength="4000"
+        placeholder="Ask about DICOM elements, modules, SOP classes, or clinical terminology..."
+      ></textarea>
+    </div>
+
+    <div class="chat-controls">
+      <label class="checkbox-row" for="chat-include-context">
+        <input id="chat-include-context" name="include_context" type="checkbox" checked>
+        <span>Ground answers with Neo4j DICOM dictionary retrieval</span>
+      </label>
+
+      <div class="btn-row">
+        <span id="chat-status" class="muted" aria-live="polite"></span>
+        <button id="chat-clear-btn" type="button" class="btn btn-secondary btn-sm">Clear</button>
+        <button type="submit" class="btn btn-primary">Send</button>
+      </div>
+    </div>
+  </form>
+</section>
+{% endblock %}

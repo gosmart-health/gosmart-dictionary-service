@@ -5,15 +5,30 @@ description = "Gosmart.Health Dictionary Service — terminology dictionary API 
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "argon2-cffi>=25.1.0",
+    "cryptography>=50.0.2",
     "fastapi>=0.165.0",
     "genkit>=0.14.0",
+    "genkit-google-genai>=0.14.0",
+    "genkit-ollama>=0.14.0",
+    "gosmart-clinical-nlu",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
     "neo4j>=6.4.1",
+    "pydantic-settings>=2.16.3",
+    "pyjwt>=2.15.1",
+    "pykka>=4.5.0",
+    "python-multipart>=0.0.34",
+    "structlog>=26.1.0",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]
 gosmart-dictionary-service = "gosmart_dictionary_service.__main__:main"
 gosmart-ds = "gosmart_dictionary_service.__main__:main"
+
+[project.entry-points."gosmart_clinical_nlu.intents"]
+find_coding_schema = "gosmart_dictionary_service.nlu.find_coding_schema:FIND_CODING_SCHEMA_SPEC"
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
@@ -26,6 +41,9 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "httpx2>=2.16.2",
+    "ipykernel>=7.4.0",
+    "matplotlib>=3.11.2",
+    "pandas>=3.1.1",
     "pytest>=9.2.0",
     "ruff>=0.17.6",
 ]
@@ -52,3 +70,6 @@ select = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["gosmart_dictionary_service", "tests"]
+
+[tool.uv.sources]
+gosmart-clinical-nlu = { git = "https://github.com/gosmart-health/gosmart-clinical-nlu.git", rev = "main" }

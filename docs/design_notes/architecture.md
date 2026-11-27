@@ -84,9 +84,10 @@ flowchart TD
 
     subgraph ServiceLayer["Core Services & Genkit Flows"]
         USER_SVC["Registrant Auth & API Key Service"]
+        NLU_SVC["Clinical NLU Service (spaCy + Reverse-Lookup + LLM Expansion)"]
         HYBRID["Hybrid Search Service (Exact + Fulltext + HNSW)"]
         GRAPH_SVC["Ontology Traversal & Crosswalk Service"]
-        GENKIT["Genkit Flows (Disambiguation & NL Grounding)"]
+        GENKIT["Genkit Flows (Phrase Synthesis & NL Grounding)"]
     end
 
     subgraph GraphStore["Standalone Neo4j Knowledge Graph (No PHI)"]
@@ -114,8 +115,9 @@ flowchart TD
     USER_SVC --> BREVO
     USER_SVC <--> USERS_CFG
     REST & MCP & CLI --> HYBRID & GRAPH_SVC & GENKIT
-    HYBRID & GRAPH_SVC --> GENKIT
-    CONCEPTS & ONTOLOGY & VEC_NODES --> HYBRID & GRAPH_SVC
+    HYBRID --> NLU_SVC
+    NLU_SVC & HYBRID & GRAPH_SVC --> GENKIT
+    CONCEPTS & ONTOLOGY & VEC_NODES --> NLU_SVC & HYBRID & GRAPH_SVC
     USERS_CFG --> AUTH_RL & GENKIT & EMB_ACT
 
     Sources --> ING_ACT
@@ -136,7 +138,8 @@ flowchart TD
 | **MCP Server** | `mcp` Python SDK | `StreamableHTTP`, `SSE`, and `STDIO` transports |
 | **CLI** | `typer` + `rich` | Entry points: `gosmart-dictionary-service`, `gosmart-ds` |
 | **Graph & Vector Store** | Standalone `neo4j` (`>=6.4`) | Dedicated non-PHI graph + Full-Text (Lucene) + native HNSW Vector Index |
-| **LLM & Embeddings** | `genkit` (`genkit-google-genai`, `genkit-ollama`) | Dynamic provider resolution via system `:LLM_Config` (Vertex AI / Gemini & Ollama) |
+| **Clinical NLU** | `gosmart-clinical-nlu` (spaCy `textcat` + `entity_ruler`) | Trained `find_coding_schema` bundle (`nlu_models/intent_models.zip`) + dynamic DB schema alerts |
+| **LLM & Embeddings** | `genkit` (`genkit-google-genai`, `genkit-ollama`) | Dynamic provider resolution via system `:LLM_Config` (`embedding-v1` & `inference-v1`, e.g. `gemma4:e2b`) |
 | **Offline GNN Pipeline** | PyTorch + PyTorch Geometric (`train` group) | Offline structural embedding job (runs on Apple M5 MPS or 6 GB CUDA GPU) |
 | **Concurrency** | `pykka` Actor Model | Non-blocking bulk terminology ingestion and background batch embedding |
 | **Configuration & Logs** | `pydantic-settings` (`GOSMART_DS_*`), `structlog` | `.env` + `tests/.env` resolution; rotating JSON/console logs |
@@ -147,7 +150,7 @@ flowchart TD
 1. **Standalone Non-PHI Neo4j Deployment**
    - Runs on its own dedicated Neo4j instance completely isolated from `gosmart-graphite` patient data. The graph holds only public terminology/ontology entities, `:Embedding` vectors, system `:LLM_Config`, and basic registrant `:User` / `:ApiKey` nodes.
 2. **Deterministic UUIDv5 Identity (`id`)**
-   - Every graph node and relationship derives its primary `id` deterministically via UUIDv5 under a dedicated DNS namespace (`gosmart.dictionary.graph`) from canonicalized JSON identity keys (e.g., `{"system": "http://snomed.info/sct", "code": "44054006"}` or `{"dicom_tag": "00180050"}`).
+   - Every graph node and relationship derives its primary `id` deterministically via UUIDv5 under a dedicated DNS namespace (`gosmart.dictionary.graph`) from canonicalized JSON identity keys—uniformly using `{system, code}` across clinical and DICOM code systems (e.g., `{"system": "http://snomed.info/sct", "code": "44054006"}` or `{"system": "http://gosmart.health/terminology/dicom-tag", "code": "00180050"}`).
    - Re-running an ingestor on a new Athena or DICOM release is strictly **idempotent** (`MERGE (c:Concept {id: row.id})`).
 3. **`Auditable` Base Entities & Non-Destructive Lifecycle**
    - Graph entities inherit from `AuditableNode` / `AuditableRelation` (`id`, `test_id`, `Action`, `ActedAt`, `ActedBy`, `CreatedAt`, `UpdatedAt`, `ExpiresAt`).
@@ -181,12 +184,13 @@ Because `gosmart-dictionary-service` contains no PHI, it operates as a **rate-li
 
 #### A. DICOM Dictionary Subgraph
 
-- **`(:DicomElement)`**: `id` (UUIDv5), `tag` (`"(0018,0050)"`), `tag_hex` (`"00180050"`), `keyword` (`"SliceThickness"`), `name` (`"Slice Thickness"`), `vr` (`"DS"`), `vm` (`"1"`), `is_retired` (`bool`), `description` (normative/clean text summary).
+- **`(:DicomElement)`**: `id` (UUIDv5 from `{system: "http://gosmart.health/terminology/dicom-tag", code: tag_hex}`), `system_uri` (`"http://gosmart.health/terminology/dicom-tag"`), `tag` (`"(0018,0050)"`), `tag_hex` (`"00180050"` — canonical `code`), `keyword` (`"SliceThickness"`), `name` (`"Slice Thickness"` — canonical `display`), `vr` (`"DS"` — code in `http://gosmart.health/terminology/dicom-vr`), `vm` (`"1"`), `is_retired` (`bool`), `description` (normative/clean text summary), `coding_key`, `coding_macro`.
 - **`(:DicomCIOD)`**: Composite IOD definition (e.g., `CT Image IOD`, `MR Image IOD`, `Enhanced SR IOD`).
 - **`(:DicomModule)`**: Module definition (e.g., `Patient`, `General Study`, `CT Image`).
 - **`(:DicomSOPClass)`**: `sop_class_uid`, `name`, `modality`.
-- **`(:DicomContextGroup)`**: DICOM PS3.16 Context Group (`cid`, `name`, `is_extensible`) linking coded concepts used in Structured Reporting (SR) and modality protocols.
+- **`(:DicomContextGroup)`**: DICOM PS3.16 Context Group (`cid`, `name`, `is_extensible`) linking coded concepts (`http://dicom.nema.org/resources/ontology/DCM`, SNOMED CT, LOINC) used in Structured Reporting (SR) and modality protocols.
 - **Relationships**:
+  - `(:DicomElement)-[:BELONGS_TO_SYSTEM]->(:CodeSystem)` (links to `http://gosmart.health/terminology/dicom-tag`)
   - `(:DicomSOPClass)-[:IMPLEMENTS_CIOD]->(:DicomCIOD)`
   - `(:DicomCIOD)-[:HAS_MODULE {usage, condition}]->(:DicomModule)`
   - `(:DicomModule)-[:USES_ELEMENT {type, description}]->(:DicomElement)` (where `type` is `1`, `1C`, `2`, `2C`, `3`)
@@ -195,12 +199,8 @@ Because `gosmart-dictionary-service` contains no PHI, it operates as a **rate-li
 #### B. Clinical Terminology & Ontology Subgraph (OHDSI Athena Canonical Model)
 
 - **`(:CodeSystem)`**:
-  - `id` (UUIDv5 from `system_uri`), `vocabulary_id` (`"SNOMED"`, `"LOINC"`, `"ICD10"`, `"ICD10CM"`, `"ICD11"`), `system_uri`, `name`, `version`, `release_date`.
-  - Canonical FHIR `system_uri` values aligned with `gosmart-graphite`:
-    - SNOMED CT: `http://snomed.info/sct`
-    - LOINC: `http://loinc.org`
-    - ICD-10 / ICD-10-CM: `http://hl7.org/fhir/sid/icd-10` / `http://hl7.org/fhir/sid/icd-10-cm`
-    - ICD-11 MMS: `http://id.who.int/icd/release/11/mms`
+  - `id` (UUIDv5 from `system_uri`), `vocabulary_id` (`"SNOMED"`, `"LOINC"`, `"ICD10"`, `"ICD10CM"`, `"ICD11"`, `"DCM"`, `"DICOM_TAG"`, `"DICOM_VR"`), `system_uri`, `name`, `version`, `release_date`.
+  - Canonical FHIR `system_uri` values are defined in [Section 4.2](#42-terminology-encoding--response-contract).
 - **`(:Concept)`**:
   - `id` (UUIDv5 from `{system_uri, code}`), `athena_concept_id` (`Optional[int]`), `system_uri`, `vocabulary_id`, `code`, `display`, `synonyms` (`List[str]`), `definition`, `domain_id` (`Condition`, `Observation`, `Procedure`, `Measurement`, `Spec Anatomic Site`, etc.), `concept_class_id`, `standard_concept` (`"S"`, `"C"`, or `null`), `is_deprecated` (`bool`), `valid_start_date`, `valid_end_date`.
   - Precomputed convenience fields: `coding_key` (`"<system_uri>|<code>"`) and `coding_macro` (`"<system_uri>|<code>|<display>"`) for zero-cost `gosmart-graphite` query generation.
@@ -216,7 +216,101 @@ Because `gosmart-dictionary-service` contains no PHI, it operates as a **rate-li
 - **`(:ApiKey)`**: `id` (UUIDv5), `prefix` (`"gs_dict_..."`), `key_hash` (SHA-256), `name`, `tier`, `rate_limit_rpm`, `resolve_limit_rpm`, `last_used_at`, `expires_at`, `is_revoked` (`bool`), linked via `(:User)-[:HAS_API_KEY]->(:ApiKey)`.
 - **`(:LLM_Config)`**: System-level LLM and embedding provider configuration (`tag`, `provider`, `model`, `url`, `dimensions`, `dimensions_truncated`, `api_key`, `location`).
 
-### 4.2 Decoupled Vector Embedding Pattern
+### 4.2 Terminology Encoding & Response Contract
+
+GoSmart DS values are consumed by downstream services (`gosmart-graphite`), developer scripts, and AI agents—**not directly by end-user humans**. The wire contract therefore prioritizes **FHIR `CodeSystem` consistency**, **developer readability**, and **MCP token efficiency**.
+
+#### A. Canonical `CodeSystem` URI Registry
+
+Every supported terminology—including DICOM PS3.6 tags and VRs—is modeled as a first-class FHIR-style `CodeSystem`. Standard clinical vocabularies and DICOM PS3.16 coded terms use their official HL7/WHO/NEMA URIs, while DICOM Data Element Tags and Value Representations (which have no official HL7 FHIR URI) use GoSmart Health's concise private `terminology` root (`http://gosmart.health/terminology/...`):
+
+| `vocabulary_id` | Canonical `system` URI | Canonical `code` Format | Scope |
+| :--- | :--- | :--- | :--- |
+| `SNOMED` | `http://snomed.info/sct` | Numeric SCTID (e.g., `59282003`) | Standard HL7/SNOMED |
+| `LOINC` | `http://loinc.org` | LOINC code (e.g., `24606-6`) | Standard HL7/Regenstrief |
+| `ICD10` | `http://hl7.org/fhir/sid/icd-10` | ICD-10 code (e.g., `I26.9`) | Standard HL7/WHO |
+| `ICD10CM` | `http://hl7.org/fhir/sid/icd-10-cm` | ICD-10-CM code (e.g., `I26.99`) | Standard HL7/CDC |
+| `ICD11` | `http://id.who.int/icd/release/11/mms` | ICD-11 MMS code (e.g., `BB00`) | Standard WHO |
+| `DCM` | `http://dicom.nema.org/resources/ontology/DCM` | PS3.16 coded term (e.g., `CT`, `121071`) | Standard NEMA PS3.16 / CIDs |
+| `DICOM_TAG` | `http://gosmart.health/terminology/dicom-tag` | 8-char uppercase hex (e.g., `00100010`) | Private GoSmart DS (PS3.6 Data Elements; matches DICOMweb JSON keys) |
+| `DICOM_VR` | `http://gosmart.health/terminology/dicom-vr` | 2-char VR code (e.g., `PN`, `DS`, `CS`) | Private GoSmart DS (PS3.5 Value Representations) |
+
+#### B. FHIR Semantics: Concept `properties` vs. `CodeableConcept.coding[]`
+
+In FHIR, multiple entries inside `CodeableConcept.coding[]` signify **equivalent translations of the same concept** (for example, SNOMED CT `59282003` and ICD-10-CM `I26.99` both represent *Pulmonary embolism*). A DICOM Data Element's Value Representation (`PN`), Value Multiplicity (`1`), Keyword (`PatientName`), and retirement status are **attributes of the tag concept**, not equivalent synonyms.
+
+Accordingly, GoSmart DS represents each resolved term as a single primary FHIR `Coding` (`system`, `code`, `display`, optional `version`) paired with a flat developer-readable `properties` object—never placing `dicom-vr` as a sibling entry in `coding[]`. Where full code-system metadata for a VR is needed, `vr` resolves against `http://gosmart.health/terminology/dicom-vr`.
+
+#### C. Dual-Representation Projection (REST vs. MCP)
+
+Internally, all services operate on the unified FHIR `CodeSystem` / `Coding` model and project responses cleanly to each interface:
+
+1. **REST API Default (`format="fhir"`, default on `/api/v1/...`):**
+   Returns the structured FHIR `Coding` object, the precomputed `gosmart-graphite` Coding Macro (`"<system>|<code>|<display>"`), and a flat `properties` map (REST callers may optionally pass `?format=compact` for bulk/high-throughput payloads).
+
+   ```json
+   // DICOM Data Element (REST default / MCP format="fhir")
+   {
+     "coding": {
+       "system": "http://gosmart.health/terminology/dicom-tag",
+       "code": "00100010",
+       "display": "Patient's Name"
+     },
+     "macro": "http://gosmart.health/terminology/dicom-tag|00100010|Patient's Name",
+     "properties": {
+       "tag": "(0010,0010)",
+       "keyword": "PatientName",
+       "vr": "PN",
+       "vr_system": "http://gosmart.health/terminology/dicom-vr",
+       "vm": "1",
+       "retired": false
+     }
+   }
+   ```
+
+   ```json
+   // Clinical Concept (REST default / MCP format="fhir")
+   {
+     "coding": {
+       "system": "http://snomed.info/sct",
+       "code": "59282003",
+       "display": "Pulmonary embolism"
+     },
+     "macro": "http://snomed.info/sct|59282003|Pulmonary embolism",
+     "properties": {
+       "vocabulary": "SNOMED",
+       "domain": "Condition",
+       "standard": "S",
+       "deprecated": false
+     }
+   }
+   ```
+
+2. **MCP Tool Default (`format="compact"`, default on MCP tools):**
+   Returns a flat, developer- and agent-readable JSON projection that avoids repeating boilerplate FHIR wrappers across 10–25 candidate matches (cutting LLM context token usage by ~50–65%). Every lookup/resolution MCP tool accepts an optional `format: "compact" | "fhir"` argument (default `"compact"`) when the caller needs full FHIR `Coding` + `properties` envelopes.
+
+   ```json
+   // DICOM Data Element (MCP default: format="compact")
+   {
+     "tag": "00100010",
+     "keyword": "PatientName",
+     "display": "Patient's Name",
+     "vr": "PN",
+     "vm": "1",
+     "retired": false
+   }
+   ```
+
+   ```json
+   // Clinical Concept (MCP default: format="compact")
+   {
+     "macro": "http://snomed.info/sct|59282003|Pulmonary embolism",
+     "vocab": "SNOMED",
+     "domain": "Condition"
+   }
+   ```
+
+### 4.3 Decoupled Vector Embedding Pattern
 
 Following `gosmart-graphite`'s decoupled vector index architecture, embeddings are stored on dedicated **`(:Embedding)`** nodes rather than inline properties on `:Concept` or `:DicomElement`:
 
@@ -233,7 +327,7 @@ Following `gosmart-graphite`'s decoupled vector index architecture, embeddings a
 - **Multi-Model Coexistence:** Multiple embedding providers/models (configured via `:LLM_Config` `tag`, such as local Ollama `nomic-embed-text`, Vertex AI `gemini-embedding-001`, or offline GNN vectors) coexist in the graph, filtered by `e.modelTag` without mutating `:Concept` nodes.
 - **Cypher 25 + Legacy Compatibility:** Vector queries use Cypher 25 `SEARCH ... IN (VECTOR INDEX ...)` with automatic fallback to `CALL db.index.vector.queryNodes(...)` and exact cosine similarity fallback when post-filtering saturates HNSW candidate pools.
 
-### 4.3 Graph Neural Network (GNN) Capabilities & Offline Compute Model
+### 4.4 Graph Neural Network (GNN) Capabilities & Offline Compute Model
 
 Text embeddings capture surface/semantic similarity in prose, whereas GNN structural embeddings capture **multi-hop ontological proximity** (e.g., concepts sharing `:HAS_ATTRIBUTE` morphology/finding-site neighborhoods and `:MAPS_TO` bridges across vocabularies).
 
@@ -255,7 +349,7 @@ Text embeddings capture surface/semantic similarity in prose, whereas GNN struct
 
 All ingestors implement a common streaming/chunked pipeline: **Validate Source → Normalize to Pydantic Models → Deterministic UUIDv5 Assignment → Batched `UNWIND` Cypher `MERGE` → Incremental `:Embedding` Enqueue**.
 
-1. **Primary Clinical Ingestor — OHDSI Athena Bundle Loader (`athena_ingestor.py`)**
+1. **Primary Clinical Ingestor — OHDSI Athena Bundle Loader (`clinical_terms_ingestor.py`)**
    - Serves as the **primary unified source** for clinical terminologies and ontologies (**SNOMED CT**, **LOINC**, **ICD-10**, **ICD-10-CM**, and **ICD-11** where included in the Athena bundle).
    - Streams standardized OMOP vocabulary CSVs (`VOCABULARY.csv`, `DOMAIN.csv`, `CONCEPT_CLASS.csv`, `CONCEPT.csv`, `CONCEPT_SYNONYM.csv`, `CONCEPT_RELATIONSHIP.csv`) in bounded chunks, materializing `:CodeSystem`, `:Concept`, `:IS_A` hierarchies, `:HAS_ATTRIBUTE` defining edges, and `:MAPS_TO` cross-vocabulary equivalences in one consistent schema.
 2. **Primary Imaging Ingestor — DICOM Dictionary Ingestor (`dicom_ingestor.py`)**
@@ -265,14 +359,15 @@ All ingestors implement a common streaming/chunked pipeline: **Validate Source �
    - **`icd11_ingestor.py`** — Optional supplement for official WHO ICD-11 MMS linearization / ICD-API entities and post-coordination axes if newer than or omitted from an Athena export.
    - **`loinc_ingestor.py` / `snomed_ingestor.py`** — Optional native format enrichers (e.g., LOINC Radiology Playbook specifics or BioPortal SCTO / RF2 axioms not carried in Athena CSVs).
 
-### 5.2 Hybrid Resolution & Genkit Flows (`service/` & `flows/`)
+### 5.2 Hybrid Resolution, Clinical NLU & Genkit Expansion (`service/nlu_service.py` & `service/search_service.py`)
 
-To guarantee **zero hallucinated codes** while supporting natural conversational phrasing, natural-language resolution runs as a grounded multi-stage funnel:
+To guarantee **zero hallucinated codes** while aiding cross-domain discovery across Clinical Terminologies and DICOM, natural-language resolution runs as a 5-stage grounded funnel:
 
-1. **Stage 1 — Exact & Lexical Match:** Instant lookup if the input already matches a DICOM tag (`(0018,0050)` / `00180050`), DICOM keyword (`SliceThickness`), exact concept code, or high-scoring Neo4j Full-Text (Lucene BM25) match over `display` and `synonyms`.
-2. **Stage 2 — HNSW Semantic Vector Retrieval:** Embeds the normalized clinical phrase via `EmbeddingService` and queries `embedding_vector_idx` filtered by requested `vocabulary_id` / `domain_id` (e.g., `Condition` for FHIR `Condition.code`, `Measurement`/`Observation` for FHIR `Observation.code`, or `DicomElement` for DICOM lookup), deduplicating per target node.
-3. **Stage 3 — Graph Context Hydration:** Enriches top-`k` candidates with immediate `:IS_A` parents, standard `:MAPS_TO` equivalents, GNN structural similarity scores (when available), or DICOM Module/VR metadata.
-4. **Stage 4 — Genkit Disambiguation Flow (Optional / Ambiguity Triggered):** When multiple candidates score closely or conversational query decomposition is needed, a structured-output Genkit flow (`temperature=0.0`, strict Pydantic output schema) selects and ranks **only** from the retrieved candidate IDs.
+1. **Stage 1 — Trained spaCy NLU & Dynamic Schema Check (`ClinicalNLUService`):** Runs incoming queries through the trained `gosmart-clinical-nlu` (`find_coding_schema`) spaCy bundle (`GOSMART_DS_NLU_MODEL_PATH`, default `./nlu_models/intent_models.zip`) to extract `CODING_SCHEMA`, `CODING_CODE`, `DICOM_TAG`, and `DICOM_UID` spans, and inspects active Neo4j `:CodeSystem` / `:DicomElement` availability (cached for `GOSMART_DS_NLU_SCHEMA_CACHE_TTL_SEC` seconds) to alert users via `warnings` whenever an extracted schema is not loaded in the current database.
+2. **Stage 2 — Deterministic Exact Match (`score = 1.0`) & Reverse-Lookup Query Rewrite:** Resolves extracted codes/tags directly in Neo4j (`MatchSource.EXACT_CODE`, `score = 1.0`), replaces resolved code spans in the query string with their Neo4j `Concept.display` / `DicomElement.name` (`nlu.rewritten_query`), and strips unknown codes so unresolved raw numbers are never sent to the LLM.
+3. **Stage 3 — Genkit LLM Alternate Phrase Synthesis (`inference-v1` / `gemma4:e2b`):** Synthesizes up to `GOSMART_DS_NLU_MAX_ALTERNATE_PHRASES` concise clinical and DICOM alternate search phrases via Genkit (`GOSMART_DS_NLU_LLM_EXPANSION_ENABLED=true`, with graceful warning fallback if the inference provider is offline).
+4. **Stage 4 — Multi-Phrase Lucene + HNSW Semantic Vector Retrieval:** Batch-embeds the rewritten query and synthesized phrases via `EmbeddingService` (`embedding-v1`) and executes hybrid retrieval across both Clinical Concepts (Lucene `concept_fulltext_idx` + 1-hop `[:IS_A]` parent convergence + on-the-fly vector cosine rerank) and DICOM entities (Lucene `dicom_element_fulltext_idx` / `dicom_structure_fulltext_idx` + precomputed `embedding_vector_idx` HNSW search).
+5. **Stage 5 — Discounted Probability & Consensus Aggregation:** Retains deterministic code matches at `score = 1.0` and aggregates discovered Clinical + DICOM candidates beneath them at discounted probabilities (`0.78` weight / `0.85` cap for `rewritten_query` when exact hits exist; `0.68` weight / `0.78` cap with `MatchSource.LLM_EXPANSION` for synthesized phrases, plus a `+0.03` multi-phrase consensus boost).
 
 ### 5.3 API & MCP Interfaces (`api/v1/` & `service/mcp_service.py`)
 
@@ -286,7 +381,9 @@ To guarantee **zero hallucinated codes** while supporting natural conversational
 
 #### Terminology Dictionary API (`/api/v1/dictionary` — requires `X-API-Key`)
 
-- `GET /api/v1/dictionary/dicom/elements/{tag_or_keyword}` — Deterministic lookup of a DICOM Data Element, its VR/VM, and participating CIODs/Modules.
+Returns the FHIR-aligned `{coding, macro, properties}` envelope by default (with optional `?format=compact`; see [Section 4.2](#42-terminology-encoding--response-contract)):
+
+- `GET /api/v1/dictionary/dicom/elements/{tag_or_keyword}` — Deterministic lookup of a DICOM Data Element, its VR/VM `properties`, and participating CIODs/Modules.
 - `POST /api/v1/dictionary/dicom/resolve` — Natural-language to DICOM Data Element / Context Group resolution (with optional modality/CIOD filter, e.g., `modality="MR"`).
 - `GET /api/v1/dictionary/concepts/{vocabulary}/{code}` — Deterministic lookup of a clinical concept (`SNOMED`, `LOINC`, `ICD10CM`, `ICD11`) returning full metadata, synonyms, and FHIR `Coding` / `gosmart-graphite` Coding Macros.
 - `POST /api/v1/dictionary/concepts/resolve` — Natural-language to coded clinical concept search filtered by vocabularies, clinical domains (`Condition`, `Observation`, `Procedure`, etc.), and `standard_only` flag; optionally expands `:IS_A` descendants and `:MAPS_TO` equivalents in a single call for `gosmart-graphite`.
@@ -302,20 +399,20 @@ To guarantee **zero hallucinated codes** while supporting natural conversational
 
 #### MCP Server Tools (`gosmart-dictionary-service`)
 
-Exposed over `StreamableHTTP` and `SSE` (authenticated via `X-API-Key` header) as well as local `STDIO` for `gosmart-graphite` agents and IDE/clinical AI assistants:
+Exposed over `StreamableHTTP` and `SSE` (authenticated via `X-API-Key` header) as well as local `STDIO` for `gosmart-graphite` agents and IDE/clinical AI assistants. Lookup and resolution tools default to `format="compact"` and accept `format="fhir"` to return the full `{coding, macro, properties}` envelope:
 
-- `resolve_dicom_elements(query, modality=None, ciod=None, limit=10)`
-- `lookup_dicom_tag(tag_or_keyword)`
-- `resolve_clinical_codes(query, vocabularies=None, domain=None, expand_descendants=False, max_depth=2, limit=10)`
+- `resolve_dicom_elements(query, modality=None, ciod=None, limit=10, format="compact")`
+- `lookup_dicom_tag(tag_or_keyword, format="compact")`
+- `resolve_clinical_codes(query, vocabularies=None, domain=None, expand_descendants=False, max_depth=2, limit=10, format="compact")`
 - `explore_ontology_neighborhood(vocabulary, code, max_depth=1, include_mappings=True)`
-- `expand_concept_descendants(vocabulary, code, max_depth=3, limit=200)`
-- `translate_code_crosswalk(source_vocabulary, source_code, target_vocabularies)`
+- `expand_concept_descendants(vocabulary, code, max_depth=3, limit=200, format="compact")`
+- `translate_code_crosswalk(source_vocabulary, source_code, target_vocabularies, format="compact")`
 - `dictionary_health_check()`
 
 ### 5.4 CLI (`gosmart-dictionary-service` / `gosmart-ds`)
 
 - `gosmart-ds serve` — Launch the FastAPI + MCP server.
-- `gosmart-ds ingest <source>` — Run idempotent ingestion pipelines (`athena`, `dicom`, and optional `icd11` / supplements) from local directories or configured URIs.
+- `gosmart-ds ingest-dicom` / `gosmart-ds ingest-clinical-terms` — Run idempotent Pykka actor ingestion pipelines (`--profile full|valid|demo-core`, `--dry-run`, `--bootstrap`, `--compute-embeddings`) from local source directories.
 - `gosmart-ds embed` — Trigger or resume incremental text `:Embedding` generation across unembedded `:Concept` and `:DicomElement` nodes for a specified `:LLM_Config` tag.
 - `gosmart-ds train-gnn` *(optional `train` group)* — Export ontology topology + text features, train GraphSAGE / R-GCN on local MPS/CUDA, and write structural `:Embedding` nodes back to Neo4j.
 - `gosmart-ds apikey <issue|revoke|list>` — Admin CLI to provision, inspect, or revoke `X-API-Key` credentials (including `INTERNAL_SERVICE` keys for `gosmart-graphite`).
@@ -335,3 +432,14 @@ Exposed over `StreamableHTTP` and `SSE` (authenticated via `X-API-Key` header) a
 - **[WHO ICD-11 API & Linearization Packages](https://icd.who.int/icdapi)** — Official WHO ICD-11 Foundation and MMS releases if supplementary attributes or newer ICD-10 ↔ ICD-11 mappings are needed beyond the Athena bundle.
 - **[SNOMED CT BioPortal Ontologies (SCTO)](https://bioportal.bioontology.org/ontologies/SCTO/)** & **[LOINC](https://loinc.org/)** — Reference documentation and optional domain-specific enrichments (e.g., LOINC/RSNA Radiology Playbook).
 - **Licensing Note for Public Access:** Registration (`/api/v1/auth/register`) captures registrant terms-of-use acceptance (`terms_accepted_at` on `:User`) to cover standard LOINC and SNOMED CT / UMLS affiliate attribution and non-redistribution terms before activating an `X-API-Key`.
+
+## Appendix: Default Configurations
+
+Due to `gosmart-graphite` already using the system default port numbers for
+`neo4j` and API port we are using these port numbers and configurations.
+
+| Configuration | Description | Default Value |
+| --- | --- | --- |
+| `neo4j local bolt port` | Neo4j container name | 7688 |
+| `neo4j local web port` | Neo4j Web access | 7475 |
+| `API Endpoint` | Primary DICOM dictionary source | 8081|

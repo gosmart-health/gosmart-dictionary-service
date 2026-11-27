@@ -1,0 +1,206 @@
+[
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "snomed"},
+      {"TEXT": "-"},
+      {"LOWER": "ct"}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "snomed"},
+      {"LOWER": "ct"}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": {"IN": ["snomed", "snomed_ct", "snomedct", "sct"]}}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "loinc"}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": {"IN": ["icd-10", "icd10"]}},
+      {"TEXT": "-"},
+      {"LOWER": {"IN": ["cm", "pcs"]}}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": {"IN": ["icd-10", "icd10"]}},
+      {"LOWER": {"IN": ["cm", "pcs"]}}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "icd"},
+      {"TEXT": "10"},
+      {"LOWER": {"IN": ["cm", "pcs"]}}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "icd"},
+      {"TEXT": {"IN": ["10", "11"]}}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {
+        "LOWER": {
+          "IN": [
+            "icd",
+            "icd-10",
+            "icd10",
+            "icd_10",
+            "icd10cm",
+            "icd_10_cm",
+            "icd10pcs",
+            "icd_10_pcs",
+            "icd-11",
+            "icd11",
+            "icd_11"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "dicom"},
+      {"LOWER": {"IN": ["tag", "element", "attribute", "uid", "vr"]}, "OP": "?"}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {"LOWER": "cpt"},
+      {"TEXT": "4"}
+    ]
+  },
+  {
+    "label": "CODING_SCHEMA",
+    "pattern": [
+      {
+        "LOWER": {
+          "IN": [
+            "dcm",
+            "ucum",
+            "rxnorm",
+            "cpt",
+            "cpt-4",
+            "cpt4",
+            "cpt_4",
+            "hcpcs",
+            "ndc",
+            "atc",
+            "mesh",
+            "radlex"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "label": "DICOM_UID",
+    "pattern": [
+      {"TEXT": {"REGEX": "^1\\.2\\.840\\.10008(?:\\.\\d+)+$"}}
+    ]
+  },
+  {
+    "label": "DICOM_TAG",
+    "pattern": [
+      {"TEXT": "("},
+      {"TEXT": {"REGEX": "^[0-9A-Fa-f]{4},[0-9A-Fa-f]{4}$"}},
+      {"TEXT": ")"}
+    ]
+  },
+  {
+    "label": "DICOM_TAG",
+    "pattern": [
+      {"TEXT": "("},
+      {"TEXT": {"REGEX": "^[0-9A-Fa-f]{4}$"}},
+      {"TEXT": ","},
+      {"TEXT": {"REGEX": "^[0-9A-Fa-f]{4}$"}},
+      {"TEXT": ")"}
+    ]
+  },
+  {
+    "label": "DICOM_TAG",
+    "pattern": [
+      {"TEXT": {"REGEX": "^[0-9A-Fa-f]{4},[0-9A-Fa-f]{4}$"}}
+    ]
+  },
+  {
+    "label": "DICOM_TAG",
+    "pattern": [
+      {"TEXT": {"REGEX": "^[0-9A-Fa-f]{4}$"}},
+      {"TEXT": ","},
+      {"TEXT": {"REGEX": "^[0-9A-Fa-f]{4}$"}}
+    ]
+  },
+  {
+    "label": "DICOM_TAG",
+    "pattern": [
+      {
+        "TEXT": {
+          "REGEX": "^(?:00[0-9A-Fa-f]{6}|(?=[0-9A-Fa-f]{8}$)(?=.*[A-Fa-f])(?=.*\\d)[0-9A-Fa-f]{8})$"
+        }
+      }
+    ]
+  },
+  {
+    "label": "CODING_CODE",
+    "pattern": [
+      {"TEXT": {"REGEX": "^\\d{1,6}$"}},
+      {"TEXT": "-"},
+      {"TEXT": {"REGEX": "^\\d{1,6}$"}},
+      {"TEXT": "-"},
+      {"TEXT": {"REGEX": "^\\d{1,4}$"}}
+    ]
+  },
+  {
+    "label": "CODING_CODE",
+    "pattern": [
+      {"TEXT": {"REGEX": "^\\d{1,7}$"}},
+      {"TEXT": "-"},
+      {"TEXT": {"REGEX": "^\\d{1,10}$"}}
+    ]
+  },
+  {
+    "label": "CODING_CODE",
+    "pattern": [
+      {"TEXT": {"REGEX": "^[A-Za-z][A-Za-z0-9]{1,3}\\.[A-Za-z0-9]{1,4}$"}}
+    ]
+  },
+  {
+    "label": "CODING_CODE",
+    "pattern": [
+      {
+        "TEXT": {
+          "REGEX": "^(?:[A-Za-z]{1,3}\\d{2}[A-Za-z0-9]{0,5}|\\d[A-Za-z]\\d{2}[A-Za-z0-9]{0,4}|\\d{2}[A-Za-z]{1,2}\\d{2}[A-Za-z0-9]{0,2})$"
+        }
+      }
+    ]
+  },
+  {
+    "label": "CODING_CODE",
+    "pattern": [
+      {"TEXT": {"REGEX": "^\\d{5,18}$"}}
+    ]
+  }
+]

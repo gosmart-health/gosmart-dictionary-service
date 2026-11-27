@@ -229,3 +229,4 @@ docs/zensical/.cache/
 # Local runtime logs and scratch output
 logs/
 tmp/
+/data-source/

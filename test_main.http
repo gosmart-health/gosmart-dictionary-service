@@ -1,11 +1,49 @@
-# Test your FastAPI endpoints
+# Test GoSmart DS FastAPI endpoints
 
-GET http://127.0.0.1:8000/
+GET http://127.0.0.1:8081/
 Accept: application/json
 
 ###
 
-GET http://127.0.0.1:8000/hello/User
+GET http://127.0.0.1:8081/
+Accept: text/html
+
+###
+
+GET http://127.0.0.1:8081/api/v1/health
 Accept: application/json
+
+###
+
+POST http://127.0.0.1:8081/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "developer@example.org",
+  "password": "StrongPassword123!",
+  "display_name": "Test Developer",
+  "terms_accepted": true
+}
+
+###
+
+POST http://127.0.0.1:8081/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "developer@example.org",
+  "password": "StrongPassword123!"
+}
+
+###
+
+POST http://127.0.0.1:8081/api/v1/chat
+Content-Type: application/json
+X-API-Key: gs_dict_replace_me
+
+{
+  "message": "What is DICOM tag (0018,0050) and its VR?",
+  "include_context": true
+}
 
 ###

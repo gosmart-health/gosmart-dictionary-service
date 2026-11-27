@@ -47,6 +47,7 @@ docs/zensical/
 ├── README.md               # This file
 └── docs/                   # Markdown source (the "docs_dir")
     ├── index.md            # Introduction
+    ├── architecture.md     # System architecture & design
     ├── getting-started/    # Installation and first steps
     └── about/              # License
 ```

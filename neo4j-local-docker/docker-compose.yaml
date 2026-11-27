@@ -1,0 +1,28 @@
+services:
+  neo4j:
+    image: neo4j:latest
+    container_name: neo4j_ds
+    restart: unless-stopped
+    ports:
+      - "7475:7474"  # HTTP (Neo4j Browser)
+      - "7688:7687"  # Bolt protocol
+    volumes:
+      - neo4j_data_ds:/data
+    environment:
+      - NEO4J_AUTH=none
+      # Default sizing targets a 32 GB host (full clinical + DICOM graph).
+      # For an 8 GB Linux demo VM (--profile demo-core), override via env:
+      #   NEO4J_HEAP_INITIAL=1G NEO4J_HEAP_MAX=3G NEO4J_PAGECACHE=2G NEO4J_TX_MAX=1G
+      - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL:-4G}
+      - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX:-8G}
+      - NEO4J_server_memory_pagecache_size=${NEO4J_PAGECACHE:-8G}
+      - NEO4J_dbms_memory_transaction_total_max=${NEO4J_TX_MAX:-4G}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  neo4j_data_ds:
