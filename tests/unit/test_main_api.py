@@ -33,7 +33,29 @@ def test_root_returns_service_metadata(client: TestClient) -> None:
     assert payload["version"] == __version__
     assert payload["docs_url"] == "/docs"
     assert payload["api_v1"] == "/api/v1"
+    assert payload["mcp"] == "/mcp"
+    assert payload["mcp_sse"] == "/mcp-sse"
     assert "db_connection" in payload
+
+
+def test_mcp_mount_requires_authentication(client: TestClient) -> None:
+    response = client.post(
+        "/mcp",
+        headers={"Accept": "application/json, text/event-stream"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0.1.0"},
+            },
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 401
+    assert response.headers.get("WWW-Authenticate") == "Bearer"
 
 
 def test_health_endpoint_healthy(client: TestClient) -> None:

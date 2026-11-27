@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}API Keys — {{ app_name }}{% endblock %}
+{% block title %}API Keys &amp; MCP Setup — {{ app_name }}{% endblock %}
 
 {% block content %}
 <section class="card">
@@ -7,7 +7,7 @@
   <p class="muted">
     Signed in as <strong>{{ current_user.display_name or current_user.primary_email }}</strong>
     (<span class="mono">{{ current_user.primary_email }}</span>).
-    API keys authenticate programmatic requests using the <code class="mono">X-API-Key</code> header.
+    API keys authenticate programmatic REST and MCP requests using the <code class="mono">X-API-Key</code> header.
   </p>
 
   {% if notice %}
@@ -26,14 +26,21 @@
         <code id="generated-api-key">{{ new_api_key }}</code>
         <button type="button" class="btn btn-secondary btn-sm" data-copy-target="generated-api-key">Copy</button>
       </div>
-      <div class="muted">Example usage:</div>
+      <div class="muted">Example REST usage:</div>
       <pre class="code-block">curl -H "X-API-Key: {{ new_api_key }}" {{ request.base_url }}api/v1/auth/me</pre>
+      {% if mcp_enabled %}
+        <div style="margin-top:0.5rem;">
+          Your new key has also been pre-filled in <a href="#mcp-setup"><strong>Connect an MCP Agent &darr;</strong></a> below.
+        </div>
+      {% endif %}
     </div>
   {% endif %}
 
   <h2>Generate a New API Key</h2>
   <form method="post" action="/keys/create">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="agent" id="create-key-mcp-agent" value="{{ mcp_guide.agent }}">
+    <input type="hidden" name="mcp_host" id="create-key-mcp-host" value="{{ mcp_guide.host_input }}">
     <div class="grid">
       <div class="form-group">
         <label for="key-name">Key Name</label>
@@ -61,6 +68,171 @@
     <button type="submit" class="btn btn-primary">Generate API Key</button>
   </form>
 </section>
+
+{% if mcp_enabled and mcp_guide %}
+<section
+  class="card"
+  id="mcp-setup"
+  data-mount-path="{{ mcp_mount_path }}"
+  data-sse-mount-path="{{ mcp_sse_mount_path }}"
+  data-default-origin="{{ mcp_guide.normalized_origin }}"
+  data-placeholder-key="{{ mcp_guide.api_key_placeholder }}"
+  data-server-alias="{{ mcp_guide.server_alias }}"
+>
+  <div class="mcp-header">
+    <div>
+      <h2>Connect an MCP Agent</h2>
+      <p class="muted" style="margin:0;">
+        Generate ready-to-use Model Context Protocol (MCP) configuration for <strong>Cursor</strong>,
+        <strong>Claude</strong>, <strong>Gemini CLI</strong>, or <strong>Antigravity</strong> with interactive
+        multi-turn terminology &amp; DICOM search.
+      </p>
+    </div>
+  </div>
+
+  <div class="mcp-section-label">1. Select Your Agent</div>
+  <nav class="mcp-agent-tabs" aria-label="MCP Agent Kind">
+    {% for tab in mcp_guide.agent_tabs %}
+      <a
+        href="/keys?agent={{ tab.id }}&amp;mcp_host={{ mcp_guide.host_input | urlencode }}#mcp-setup"
+        class="mcp-agent-tab {% if mcp_guide.agent == tab.id %}active{% endif %}"
+        data-mcp-agent="{{ tab.id }}"
+      >
+        <span>{{ tab.label }}</span>
+        <span class="mcp-tab-file mono">{{ tab.filename }}</span>
+      </a>
+    {% endfor %}
+  </nav>
+
+  <div class="grid mcp-inputs-grid">
+    <div class="form-group" style="margin-bottom:0;">
+      <label for="mcp-server-host">2. Server Host or Base URL</label>
+      <input
+        id="mcp-server-host"
+        name="mcp_host"
+        type="text"
+        value="{{ mcp_guide.host_input }}"
+        placeholder="e.g. dictionary.gosmart.health or http://127.0.0.1:8081"
+        autocomplete="off"
+        spellcheck="false"
+      >
+      <div class="muted mcp-field-hint">
+        Streamable HTTP endpoint: <code class="mono" id="mcp-endpoint-preview">{{ mcp_guide.endpoint_url }}</code>
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-bottom:0;">
+      <label for="mcp-api-key-input">3. API Key (<code class="mono">X-API-Key</code>)</label>
+      <div class="mcp-key-input-row">
+        <input
+          id="mcp-api-key-input"
+          type="text"
+          class="mono"
+          value="{{ new_api_key or '' }}"
+          placeholder="Paste saved gs_dict_... key or click Generate Key"
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <form method="post" action="/keys/create#mcp-setup" class="mcp-quick-key-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="name" id="mcp-quick-key-name" value="MCP — {{ mcp_guide.agent_label }}">
+          <input type="hidden" name="agent" id="mcp-quick-key-agent" value="{{ mcp_guide.agent }}">
+          <input type="hidden" name="mcp_host" id="mcp-quick-key-host" value="{{ mcp_guide.host_input }}">
+          <button type="submit" class="btn btn-secondary btn-sm" title="Create a new API key and pre-fill it here">
+            Generate Key
+          </button>
+        </form>
+      </div>
+      <div class="muted mcp-field-hint" id="mcp-key-status">
+        {% if new_api_key %}
+          <span class="mcp-key-ready">
+            Pre-filled with newly generated key{% if new_api_key_name %} ({{ new_api_key_name }}){% endif %}.
+            Copy or download now—full keys are shown only once.
+          </span>
+        {% else %}
+          Existing keys store only SHA-256 hashes. Paste a saved <code class="mono">gs_dict_...</code> key above or click
+          <strong>Generate Key</strong> to auto-populate a fresh key.
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="mcp-locations-panel">
+    <div class="mcp-section-label">
+      Where to Put the File (<span id="mcp-agent-title">{{ mcp_guide.agent_label }}</span>)
+    </div>
+    <div class="mcp-locations-box" id="mcp-config-locations">
+      {% for loc in mcp_guide.config_locations %}
+        <div class="mcp-location-row">
+          <span class="mcp-location-scope">{{ loc.scope }}</span>
+          <code class="mono mcp-location-path">{{ loc.path }}</code>
+          <button type="button" class="btn btn-secondary btn-xs" data-copy-text="{{ loc.path }}">Copy Path</button>
+        </div>
+      {% endfor %}
+    </div>
+    <p class="muted mcp-merge-hint" id="mcp-merge-hint">{{ mcp_guide.merge_hint }}</p>
+  </div>
+
+  <div class="mcp-code-section">
+    <div class="mcp-code-header">
+      <div class="mcp-code-title">
+        <span class="pill pill-schema" id="mcp-filename-badge">{{ mcp_guide.download_filename }}</span>
+        <span
+          class="pill pill-warn {% if mcp_guide.has_real_key %}is-hidden{% endif %}"
+          id="mcp-placeholder-badge"
+        >
+          Replace {{ mcp_guide.api_key_placeholder }}
+        </span>
+      </div>
+      <div class="btn-row">
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          id="mcp-copy-json-btn"
+          data-copy-target="mcp-config-json"
+        >
+          Copy JSON
+        </button>
+        <a
+          href="{{ mcp_guide.download_url }}"
+          class="btn btn-secondary btn-sm"
+          id="mcp-download-btn"
+          download="{{ mcp_guide.download_filename }}"
+          data-download-filename="{{ mcp_guide.download_filename }}"
+        >
+          Download <span class="mono" id="mcp-download-label">{{ mcp_guide.download_filename }}</span>
+        </a>
+      </div>
+    </div>
+    <pre class="code-block mcp-code-block"><code id="mcp-config-json">{{ mcp_guide.json_config }}</code></pre>
+  </div>
+
+  <div
+    class="mcp-cli-section {% if not mcp_guide.cli_command %}is-hidden{% endif %}"
+    id="mcp-cli-wrap"
+  >
+    <div class="mcp-code-header mcp-cli-header">
+      <span class="muted"><strong>Optional CLI registration one-liner:</strong></span>
+      <button type="button" class="btn btn-secondary btn-xs" data-copy-target="mcp-cli-command">Copy Command</button>
+    </div>
+    <pre class="code-block mcp-code-block"><code id="mcp-cli-command">{{ mcp_guide.cli_command or "" }}</code></pre>
+  </div>
+
+  <div class="mcp-steps-section">
+    <div class="mcp-section-label">Short Installation Instructions</div>
+    <ol class="mcp-steps-list" id="mcp-setup-steps">
+      {% for step in mcp_guide.steps %}
+        <li>{{ step }}</li>
+      {% endfor %}
+    </ol>
+    <p class="muted mcp-proxy-note">
+      <strong>Reverse-proxy note:</strong> When exposing this server on a custom hostname, ensure the hostname is
+      configured in <code class="mono">GOSMART_DS_PUBLIC_BASE_URL</code> or
+      <code class="mono">GOSMART_DS_MCP_ALLOWED_HOSTS</code>.
+    </p>
+  </div>
+</section>
+{% endif %}
 
 <section class="card">
   <h2>Your API Keys</h2>

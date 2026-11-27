@@ -450,6 +450,26 @@ def _scope_to_entity_types(scope: ChatSearchScope) -> Optional[List[str]]:
     return None
 
 
+def _merge_citations(
+    primary: Sequence[ChatCitation],
+    supplemental: Optional[Sequence[ChatCitation]],
+    *,
+    limit: int,
+) -> List[ChatCitation]:
+    """Merge fresh grounding citations with prior session entities without duplicating nodes."""
+    merged: List[ChatCitation] = []
+    seen: set[str] = set()
+    for item in (*primary, *(supplemental or ())):
+        key = item.id or f"{item.entity_type}:{item.identifier}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
 class DictionaryChatService:
     """Grounded AI Chat assistant over GoSmart DS Neo4j dictionary entities and Genkit LLM flows."""
 
@@ -753,7 +773,12 @@ class DictionaryChatService:
             )
             raise ChatProviderError(f"LLM inference failed for {config.provider}/{config.model}: {exc}") from exc
 
-    async def chat(self, request: ChatRequest) -> ChatResponse:
+    async def chat(
+        self,
+        request: ChatRequest,
+        *,
+        extra_citations: Optional[Sequence[ChatCitation]] = None,
+    ) -> ChatResponse:
         """Run a grounded Dictionary AI Chat turn powered by ``SearchService`` + Genkit."""
         bundle = _GroundingBundle()
         if request.include_context:
@@ -764,6 +789,12 @@ class DictionaryChatService:
                 include_related=request.include_related,
                 test_id=request.test_id,
             )
+            if extra_citations:
+                bundle.citations = _merge_citations(
+                    bundle.citations,
+                    [self._ensure_citation_drilldown(c) for c in extra_citations],
+                    limit=request.context_limit,
+                )
 
         config = await self.resolve_inference_config()
         prompt = self.build_prompt(

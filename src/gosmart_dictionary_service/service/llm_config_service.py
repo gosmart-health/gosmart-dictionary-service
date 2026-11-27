@@ -97,7 +97,7 @@ WHERE ($include_deleted = true OR (l.Action IS NULL OR l.Action <> 'DELETE'))
   AND (($test_id IS NULL AND l.test_id IS NULL) OR ($test_id IS NOT NULL AND l.test_id = $test_id))
 RETURN properties(l) AS config,
        collect(DISTINCT properties(g)) AS groups
-ORDER BY l.tag ASC
+ORDER BY config.tag ASC
 """
 
 _SOFT_DELETE_LLM_CONFIG_CYPHER: LiteralString = """

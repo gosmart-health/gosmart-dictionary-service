@@ -10,12 +10,20 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from gosmart_dictionary_service.api.v1.router import api_v1_router
 from gosmart_dictionary_service.core.config import get_settings
 from gosmart_dictionary_service.core.logging import bind_log_context, clear_log_context, get_logger, setup_logging
 from gosmart_dictionary_service.db.neo4j import neo4j_client
 from gosmart_dictionary_service.db.schema_loader import SchemaInitializationError, apply_schema_async
+from gosmart_dictionary_service.service.mcp_service import (
+    DirectMCPMountAlias,
+    get_mcp_sse_app,
+    get_mcp_streamable_http_app,
+    mcp,
+    refresh_mcp_streamable_app,
+)
 from gosmart_dictionary_service.service.system_service import system_service
 from gosmart_dictionary_service.web import STATIC_DIR, web_router
 
@@ -46,7 +54,7 @@ https://gosmart.health
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan for managing structured logging, DB drivers, and background services."""
+    """Application lifespan for managing structured logging, DB drivers, and MCP session manager."""
     logo_print()
     setup_logging()
     settings = get_settings()
@@ -55,6 +63,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         app_name=settings.APP_NAME,
         version=settings.APP_VERSION,
         dev_mode=settings.DEV_MODE,
+        mcp_enabled=settings.MCP_ENABLED,
         log_level=settings.LOG_LEVEL,
         log_format=settings.LOG_FORMAT,
         log_rotation_days=settings.LOG_ROTATION_DAYS,
@@ -95,14 +104,17 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             raise
         logger.warning("neo4j_init_notice", error=str(e), dev_mode=True)
 
-    # NOTE: Background Pykka actors (AuditActor, IngestionActor, EmbeddingActor)
-    # and MCP session manager will be wired here in Phase 2.
-    yield
-
-    # Clean shutdown
-    logger.info("server_shutting_down", app_name=settings.APP_NAME)
-    await neo4j_client.close()
-    logger.info("server_shutdown_complete")
+    try:
+        if settings.MCP_ENABLED:
+            refresh_mcp_streamable_app(settings)
+            async with mcp.session_manager.run():
+                yield
+        else:
+            yield
+    finally:
+        logger.info("server_shutting_down", app_name=settings.APP_NAME)
+        await neo4j_client.close()
+        logger.info("server_shutdown_complete")
 
 
 def create_app() -> FastAPI:
@@ -161,6 +173,15 @@ def create_app() -> FastAPI:
 
     # Mount REST API routes
     fastapi_app.include_router(api_v1_router, prefix=settings.API_V1_PREFIX)
+
+    # Mount Model Context Protocol (MCP) Streamable HTTP (/mcp) & SSE (/mcp-sse) transports
+    if settings.MCP_ENABLED:
+        mcp_mount = settings.MCP_MOUNT_PATH.rstrip("/") or "/mcp"
+        mcp_sse_mount = settings.MCP_SSE_MOUNT_PATH.rstrip("/") or "/mcp-sse"
+        streamable_app = get_mcp_streamable_http_app(streamable_http_path="/")
+        fastapi_app.router.routes.append(Route(mcp_mount, endpoint=DirectMCPMountAlias(streamable_app, mcp_mount)))
+        fastapi_app.mount(mcp_mount, streamable_app, name="mcp")
+        fastapi_app.mount(mcp_sse_mount, get_mcp_sse_app(settings), name="mcp_sse")
 
     # Mount multi-page HTML web portal routes (/, /register, /verify-email, /login, /logout, /keys, /chat)
     fastapi_app.include_router(web_router)

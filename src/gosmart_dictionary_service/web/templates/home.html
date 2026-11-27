@@ -12,7 +12,7 @@
     {% if current_user %}
       <a href="/chat" class="btn btn-primary">Open AI Chat</a>
       <a href="/explore" class="btn btn-secondary">Ontology Explorer</a>
-      <a href="/keys" class="btn btn-secondary">Manage API Keys</a>
+      <a href="/keys" class="btn btn-secondary">API Keys &amp; MCP Setup</a>
       <a href="/docs" class="btn btn-secondary">Explore REST API</a>
     {% else %}
       <a href="/register" class="btn btn-primary">Create Account</a>
@@ -33,12 +33,12 @@
   </div>
 
   <div class="card">
-    <h2>2. Generate API Keys</h2>
+    <h2>2. Generate API Keys &amp; Connect MCP</h2>
     <p class="muted">
       Issue scoped <code class="mono">X-API-Key</code> credentials (<code class="mono">gs_dict_...</code>)
-      for REST API calls, scripts, and MCP tools, and revoke them anytime.
+      and copy or download ready-to-use MCP config JSON for Cursor, Claude, Gemini CLI, and Antigravity.
     </p>
-    <a href="/keys">Manage API Keys &rarr;</a>
+    <a href="/keys#mcp-setup">Manage API Keys &amp; MCP Setup &rarr;</a>
   </div>
 
   <div class="card">

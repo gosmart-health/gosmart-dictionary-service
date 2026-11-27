@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from collections.abc import Sequence
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from gosmart_dictionary_service.actor.clinical_terms_ingestion_actor import ClinicalTermsIngestionActor
 from gosmart_dictionary_service.actor.dicom_ingestion_actor import DicomIngestionActor
@@ -18,6 +19,7 @@ from gosmart_dictionary_service.model.actor_message import ClinicalTermsIngestMe
 from gosmart_dictionary_service.model.clinical.constants import ClinicalIngestionProfile
 from gosmart_dictionary_service.model.llm_config import DEFAULT_EMBEDDING_CONFIG_TAG
 from gosmart_dictionary_service.model.result import STATUS_OK
+from gosmart_dictionary_service.service.mcp_service import build_mcp_transport_security, run_mcp_server
 from gosmart_dictionary_service.service.system_service import system_service
 
 
@@ -44,6 +46,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # serve (default when no subcommand given)
     subparsers.add_parser("serve", help="Start the FastAPI HTTP server with uvicorn")
+
+    # mcp
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Start the GoSmart DS Model Context Protocol (MCP) server (stdio, streamable-http, or sse)",
+    )
+    mcp_parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http", "sse"],
+        default="stdio",
+        help="MCP transport protocol (default: stdio)",
+    )
+    mcp_parser.add_argument(
+        "--host",
+        default=None,
+        help="Host binding when --transport is 'streamable-http' or 'sse' (default: 127.0.0.1)",
+    )
+    mcp_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port binding when --transport is 'streamable-http' or 'sse' (default: 8000)",
+    )
 
     # bootstrap
     bootstrap_parser = subparsers.add_parser(
@@ -259,6 +284,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command in (None, "serve"):
         run()
         return 0
+
+    if args.command == "mcp":
+        log_stream = sys.stderr if args.transport == "stdio" else sys.stdout
+        setup_logging(stream=log_stream)
+        run_kwargs: Dict[str, Any] = {}
+        if args.transport in ("streamable-http", "sse"):
+            run_kwargs["transport_security"] = build_mcp_transport_security()
+            if args.host:
+                run_kwargs["host"] = args.host
+            if args.port is not None:
+                run_kwargs["port"] = args.port
+        try:
+            run_mcp_server(transport=args.transport, **run_kwargs)
+            return 0
+        finally:
+            try:
+                asyncio.run(neo4j_client.close())
+            except Exception:
+                if neo4j_client._sync_driver is not None:
+                    neo4j_client._sync_driver.close()
+                    neo4j_client._sync_driver = None
 
     setup_logging()
 

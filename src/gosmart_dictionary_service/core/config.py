@@ -43,6 +43,43 @@ class Settings(BaseSettings):
     RELOAD: bool = Field(default=True, description="Uvicorn auto-reload")
     API_V1_PREFIX: str = Field(default="/api/v1", description="API v1 route prefix")
 
+    # Model Context Protocol (MCP) Server & Interactive Session Settings
+    MCP_ENABLED: bool = Field(
+        default=True,
+        description="Enable Model Context Protocol (MCP) HTTP/SSE transports on the FastAPI server",
+    )
+    MCP_MOUNT_PATH: str = Field(
+        default="/mcp",
+        description="FastAPI mount path for Streamable HTTP MCP transport",
+    )
+    MCP_SSE_MOUNT_PATH: str = Field(
+        default="/mcp-sse",
+        description="FastAPI mount path for legacy Server-Sent Events (SSE) MCP transport",
+    )
+    MCP_SESSION_TTL_SEC: int = Field(
+        default=3600,
+        ge=60,
+        description="Sliding idle TTL in seconds for interactive MCP session context and HTTP session auth bindings",
+    )
+    MCP_MAX_SESSIONS: int = Field(
+        default=500,
+        ge=1,
+        description="Maximum active interactive MCP session contexts retained in memory (LRU eviction)",
+    )
+    MCP_MAX_HISTORY_TURNS: int = Field(
+        default=20,
+        ge=2,
+        le=100,
+        description="Maximum conversational messages stored per interactive MCP session",
+    )
+    MCP_ALLOWED_HOSTS: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional comma-separated extra Host header patterns permitted by MCP DNS-rebinding protection "
+            "(e.g. 'dictionary.gosmart.health,*.gosmart.health')"
+        ),
+    )
+
     # Logging Configuration (structlog & rotation)
     LOG_LEVEL: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
     LOG_FORMAT: str = Field(default="json", description="Console log format: 'json' or 'console'")

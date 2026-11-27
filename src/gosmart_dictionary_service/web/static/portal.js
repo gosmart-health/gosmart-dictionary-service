@@ -655,6 +655,393 @@
     }
   }
 
+  // 4. MCP Client Setup configurator on /keys (#mcp-setup)
+  function initMcpSetup() {
+    var section = document.getElementById("mcp-setup");
+    if (!section) return;
+
+    var mountPath = section.getAttribute("data-mount-path") || "/mcp";
+    var sseMountPath = section.getAttribute("data-sse-mount-path") || "/mcp-sse";
+    var defaultOrigin = section.getAttribute("data-default-origin") || window.location.origin;
+    var placeholderKey = section.getAttribute("data-placeholder-key") || "<YOUR_GOSMART_API_KEY>";
+    var serverAlias = section.getAttribute("data-server-alias") || "gosmart-dictionary";
+
+    var hostInput = document.getElementById("mcp-server-host");
+    var keyInput = document.getElementById("mcp-api-key-input");
+    var endpointPreview = document.getElementById("mcp-endpoint-preview");
+    var agentTitle = document.getElementById("mcp-agent-title");
+    var locationsContainer = document.getElementById("mcp-config-locations");
+    var mergeHintEl = document.getElementById("mcp-merge-hint");
+    var filenameBadge = document.getElementById("mcp-filename-badge");
+    var placeholderBadge = document.getElementById("mcp-placeholder-badge");
+    var downloadBtn = document.getElementById("mcp-download-btn");
+    var jsonCodeEl = document.getElementById("mcp-config-json");
+    var cliWrap = document.getElementById("mcp-cli-wrap");
+    var cliCommandEl = document.getElementById("mcp-cli-command");
+    var stepsList = document.getElementById("mcp-setup-steps");
+    var keyStatusEl = document.getElementById("mcp-key-status");
+
+    var createKeyAgent = document.getElementById("create-key-mcp-agent");
+    var createKeyHost = document.getElementById("create-key-mcp-host");
+    var quickKeyName = document.getElementById("mcp-quick-key-name");
+    var quickKeyAgent = document.getElementById("mcp-quick-key-agent");
+    var quickKeyHost = document.getElementById("mcp-quick-key-host");
+
+    var tabLinks = Array.prototype.slice.call(section.querySelectorAll("[data-mcp-agent]"));
+    var activeAgent = "cursor";
+    tabLinks.forEach(function (tab) {
+      if (tab.classList.contains("active")) {
+        activeAgent = tab.getAttribute("data-mcp-agent") || "cursor";
+      }
+    });
+    var hadInitialServerKey = Boolean(keyInput && keyInput.value && keyInput.value.trim());
+
+    function isLocalAuthority(authority) {
+      var raw = (authority || "").trim().toLowerCase();
+      var hostOnly;
+      if (raw.charAt(0) === "[") {
+        var closeIdx = raw.indexOf("]");
+        hostOnly = closeIdx !== -1 ? raw.slice(1, closeIdx) : raw.slice(1);
+      } else {
+        hostOnly = raw.split(":")[0];
+      }
+      return (
+        hostOnly === "localhost" ||
+        hostOnly === "127.0.0.1" ||
+        hostOnly === "::1" ||
+        hostOnly === "0.0.0.0" ||
+        hostOnly === "testserver" ||
+        hostOnly.slice(-6) === ".local" ||
+        hostOnly.slice(-10) === ".localhost"
+      );
+    }
+
+    function normalizeEndpoint(rawHost) {
+      var candidate = (rawHost || "").trim() || (defaultOrigin || "").trim() || window.location.origin;
+      candidate = candidate.replace(/\/+$/, "");
+
+      if (!/^https?:\/\//i.test(candidate)) {
+        var authority = candidate.split("/")[0];
+        var scheme = isLocalAuthority(authority) ? "http" : "https";
+        candidate = scheme + "://" + candidate;
+      }
+
+      var cleanMount = "/" + String(mountPath || "/mcp").replace(/^\/+|\/+$/g, "");
+      var cleanSse = "/" + String(sseMountPath || "/mcp-sse").replace(/^\/+|\/+$/g, "");
+
+      try {
+        var parsed = new URL(candidate);
+        var cleanPath = parsed.pathname.replace(/\/+$/, "");
+        var suffixes = [cleanSse + "/sse", cleanSse, cleanMount];
+        for (var i = 0; i < suffixes.length; i += 1) {
+          var sfx = suffixes[i];
+          if (sfx && cleanPath.toLowerCase().slice(-sfx.length) === sfx.toLowerCase()) {
+            cleanPath = cleanPath.slice(0, cleanPath.length - sfx.length).replace(/\/+$/, "");
+            break;
+          }
+        }
+        var baseOrigin = (parsed.protocol + "//" + parsed.host + cleanPath).replace(/\/+$/, "");
+        return { base: baseOrigin, endpoint: baseOrigin + cleanMount };
+      } catch (_err) {
+        var fallbackBase = candidate.replace(/\/+$/, "");
+        return { base: fallbackBase, endpoint: fallbackBase + cleanMount };
+      }
+    }
+
+    function buildAgentSpec(agent, endpointUrl, effectiveKey) {
+      var spec = {};
+      var serverObj;
+
+      if (agent === "claude-code") {
+        spec.label = "Claude Code";
+        spec.filename = ".mcp.json";
+        serverObj = {
+          type: "http",
+          url: endpointUrl,
+          headers: { "X-API-Key": effectiveKey }
+        };
+        spec.locations = [
+          { scope: "Project (shared / repo root)", path: ".mcp.json" },
+          { scope: "Global (macOS / Linux)", path: "~/.claude.json" },
+          { scope: "Global (Windows)", path: "%USERPROFILE%\\.claude.json" }
+        ];
+        spec.mergeHint =
+          'Save as .mcp.json in your project root, or merge the "gosmart-dictionary" entry inside the existing "mcpServers" object in ~/.claude.json (or run the CLI command below).';
+        spec.cli =
+          "claude mcp add --transport http " +
+          serverAlias +
+          " " +
+          endpointUrl +
+          ' --header "X-API-Key: ' +
+          effectiveKey +
+          '"';
+        spec.steps = [
+          "Place or merge the JSON into .mcp.json (project) or ~/.claude.json (global), or run the claude mcp add command below.",
+          'Keep "type": "http" intact\u2014Claude Code requires an explicit transport type for remote HTTP MCP servers.',
+          "Run /mcp inside an interactive Claude Code session to verify gosmart-dictionary is connected."
+        ];
+      } else if (agent === "claude-desktop") {
+        spec.label = "Claude Desktop";
+        spec.filename = "claude_desktop_config.json";
+        serverObj = {
+          command: "npx",
+          args: ["-y", "mcp-remote", endpointUrl, "--header", "X-API-Key:${GOSMART_API_KEY}"],
+          env: { GOSMART_API_KEY: effectiveKey }
+        };
+        spec.locations = [
+          { scope: "macOS", path: "~/Library/Application Support/Claude/claude_desktop_config.json" },
+          { scope: "Windows", path: "%APPDATA%\\Claude\\claude_desktop_config.json" },
+          { scope: "Linux", path: "~/.config/Claude/claude_desktop_config.json" }
+        ];
+        spec.mergeHint =
+          'Open via Claude Desktop \u2192 Settings \u2192 Developer \u2192 Edit Config, and merge "gosmart-dictionary" under "mcpServers".';
+        spec.cli = "";
+        spec.steps = [
+          "Ensure Node.js 18+ (npx) is installed\u2014claude_desktop_config.json bridges remote HTTP headers via mcp-remote.",
+          "Save or merge the JSON block into claude_desktop_config.json at your OS path above.",
+          "Restart Claude Desktop completely to load the GoSmart Dictionary tools."
+        ];
+      } else if (agent === "gemini") {
+        spec.label = "Gemini CLI";
+        spec.filename = "settings.json";
+        serverObj = {
+          httpUrl: endpointUrl,
+          headers: { "X-API-Key": effectiveKey }
+        };
+        spec.locations = [
+          { scope: "Project (workspace)", path: ".gemini/settings.json" },
+          { scope: "Global (macOS / Linux)", path: "~/.gemini/settings.json" },
+          { scope: "Global (Windows)", path: "%USERPROFILE%\\.gemini\\settings.json" }
+        ];
+        spec.mergeHint =
+          'settings.json also stores general Gemini CLI settings\u2014merge "gosmart-dictionary" inside its "mcpServers" object rather than overwriting an existing settings.json (or run the CLI command below).';
+        spec.cli =
+          'gemini mcp add --transport http --header "X-API-Key: ' +
+          effectiveKey +
+          '" ' +
+          serverAlias +
+          " " +
+          endpointUrl;
+        spec.steps = [
+          "Merge the JSON block into ~/.gemini/settings.json or .gemini/settings.json, or run the gemini mcp add command below.",
+          'Keep "httpUrl" (Gemini CLI reserves "url" for legacy SSE) and the hyphenated alias "gosmart-dictionary".',
+          "Run /mcp inside an interactive gemini session to confirm gosmart-dictionary is active."
+        ];
+      } else if (agent === "antigravity") {
+        spec.label = "Antigravity";
+        spec.filename = "mcp_config.json";
+        serverObj = {
+          serverUrl: endpointUrl,
+          headers: { "X-API-Key": effectiveKey }
+        };
+        spec.locations = [
+          { scope: "Workspace", path: ".agents/mcp_config.json" },
+          { scope: "Global (macOS / Linux)", path: "~/.gemini/config/mcp_config.json" },
+          { scope: "Global (Windows)", path: "%USERPROFILE%\\.gemini\\config\\mcp_config.json" }
+        ];
+        spec.mergeHint =
+          'Save directly as .agents/mcp_config.json for a single workspace, or merge "gosmart-dictionary" under "mcpServers" in ~/.gemini/config/mcp_config.json (also accessible via MCP Servers \u2192 Manage MCP Servers \u2192 View raw config).';
+        spec.cli = "";
+        spec.steps = [
+          "Open MCP Servers \u2192 Manage MCP Servers \u2192 View raw config in Antigravity, or open ~/.gemini/config/mcp_config.json (or <workspace>/.agents/mcp_config.json).",
+          'Merge "gosmart-dictionary" under "mcpServers" and save (Antigravity uses "serverUrl" and does not accept Gemini CLI\'s "httpUrl").',
+          "Refresh MCP servers in Antigravity to load the 15 GoSmart Dictionary tools."
+        ];
+      } else {
+        spec.label = "Cursor";
+        spec.filename = "mcp.json";
+        serverObj = {
+          url: endpointUrl,
+          headers: { "X-API-Key": effectiveKey }
+        };
+        spec.locations = [
+          { scope: "Project (workspace)", path: ".cursor/mcp.json" },
+          { scope: "Global (macOS / Linux)", path: "~/.cursor/mcp.json" },
+          { scope: "Global (Windows)", path: "%USERPROFILE%\\.cursor\\mcp.json" }
+        ];
+        spec.mergeHint =
+          'Save directly as a new mcp.json file, or merge "gosmart-dictionary" inside your existing "mcpServers" object.';
+        spec.cli = "";
+        spec.steps = [
+          "Save or merge the JSON into .cursor/mcp.json (project) or ~/.cursor/mcp.json (global), or open Cursor Settings \u2192 Tools & MCP.",
+          "Save the file and confirm gosmart-dictionary shows a green status indicator.",
+          'Ask Cursor a terminology or DICOM question (e.g. "Search SNOMED for acute pneumonia").'
+        ];
+      }
+
+      var root = { mcpServers: {} };
+      root.mcpServers[serverAlias] = serverObj;
+      spec.json = JSON.stringify(root, null, 2);
+      return spec;
+    }
+
+    function renderLocations(locations) {
+      if (!locationsContainer) return;
+      locationsContainer.textContent = "";
+      locations.forEach(function (loc) {
+        var row = document.createElement("div");
+        row.className = "mcp-location-row";
+
+        var scopeSpan = document.createElement("span");
+        scopeSpan.className = "mcp-location-scope";
+        scopeSpan.textContent = loc.scope;
+
+        var pathCode = document.createElement("code");
+        pathCode.className = "mono mcp-location-path";
+        pathCode.textContent = loc.path;
+
+        var copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "btn btn-secondary btn-xs";
+        copyBtn.setAttribute("data-copy-text", loc.path);
+        copyBtn.textContent = "Copy Path";
+
+        row.appendChild(scopeSpan);
+        row.appendChild(pathCode);
+        row.appendChild(copyBtn);
+        locationsContainer.appendChild(row);
+      });
+    }
+
+    function renderSteps(steps) {
+      if (!stepsList) return;
+      stepsList.textContent = "";
+      steps.forEach(function (stepText) {
+        var li = document.createElement("li");
+        li.textContent = stepText;
+        stepsList.appendChild(li);
+      });
+    }
+
+    function updateDownloadButtonLabel(filename) {
+      if (!downloadBtn) return;
+      downloadBtn.setAttribute("download", filename);
+      downloadBtn.setAttribute("data-download-filename", filename);
+      downloadBtn.textContent = "";
+      downloadBtn.appendChild(document.createTextNode("Download "));
+      var span = document.createElement("span");
+      span.className = "mono";
+      span.id = "mcp-download-label";
+      span.textContent = filename;
+      downloadBtn.appendChild(span);
+    }
+
+    function renderMcpConfigurator(userEditedKey) {
+      var rawHost = hostInput ? hostInput.value : "";
+      var resolved = normalizeEndpoint(rawHost);
+      var hostValue = (rawHost || "").trim() || resolved.base;
+      var rawKey = keyInput && keyInput.value ? keyInput.value.trim() : "";
+      var hasRealKey = Boolean(rawKey);
+      var effectiveKey = hasRealKey ? rawKey : placeholderKey;
+      var spec = buildAgentSpec(activeAgent, resolved.endpoint, effectiveKey);
+
+      tabLinks.forEach(function (tab) {
+        var tabAgent = tab.getAttribute("data-mcp-agent") || "cursor";
+        var isSelected = tabAgent === activeAgent;
+        tab.classList.toggle("active", isSelected);
+        tab.href = "/keys?agent=" + encodeURIComponent(tabAgent) + "&mcp_host=" + encodeURIComponent(hostValue) + "#mcp-setup";
+      });
+
+      if (endpointPreview) endpointPreview.textContent = resolved.endpoint;
+      if (agentTitle) agentTitle.textContent = spec.label;
+      renderLocations(spec.locations);
+      if (mergeHintEl) mergeHintEl.textContent = spec.mergeHint;
+      if (filenameBadge) filenameBadge.textContent = spec.filename;
+      if (placeholderBadge) placeholderBadge.classList.toggle("is-hidden", hasRealKey);
+      if (jsonCodeEl) jsonCodeEl.textContent = spec.json;
+
+      if (downloadBtn) {
+        downloadBtn.href =
+          "/keys/mcp-config.json?agent=" + encodeURIComponent(activeAgent) + "&mcp_host=" + encodeURIComponent(hostValue);
+        updateDownloadButtonLabel(spec.filename);
+      }
+
+      if (cliWrap && cliCommandEl) {
+        if (spec.cli) {
+          cliWrap.classList.remove("is-hidden");
+          cliCommandEl.textContent = spec.cli;
+        } else {
+          cliWrap.classList.add("is-hidden");
+          cliCommandEl.textContent = "";
+        }
+      }
+
+      renderSteps(spec.steps);
+
+      if (createKeyAgent) createKeyAgent.value = activeAgent;
+      if (createKeyHost) createKeyHost.value = hostValue;
+      if (quickKeyAgent) quickKeyAgent.value = activeAgent;
+      if (quickKeyHost) quickKeyHost.value = hostValue;
+      if (quickKeyName) quickKeyName.value = "MCP \u2014 " + spec.label;
+
+      if (userEditedKey && keyStatusEl && !hadInitialServerKey) {
+        if (hasRealKey) {
+          keyStatusEl.textContent = "Injected your API key into the JSON snippet (kept only in browser memory).";
+        } else {
+          keyStatusEl.textContent =
+            "Existing keys store only SHA-256 hashes. Paste a saved gs_dict_... key above or click Generate Key.";
+        }
+      }
+    }
+
+    tabLinks.forEach(function (tab) {
+      tab.addEventListener("click", function (event) {
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
+        activeAgent = tab.getAttribute("data-mcp-agent") || "cursor";
+        renderMcpConfigurator(false);
+      });
+    });
+
+    if (hostInput) {
+      hostInput.addEventListener("input", function () {
+        renderMcpConfigurator(false);
+      });
+    }
+
+    if (keyInput) {
+      keyInput.addEventListener("input", function () {
+        hadInitialServerKey = false;
+        renderMcpConfigurator(true);
+      });
+    }
+
+    if (downloadBtn) {
+      downloadBtn.addEventListener("click", function (event) {
+        if (!window.Blob || !window.URL || !window.URL.createObjectURL || !jsonCodeEl) return;
+        event.preventDefault();
+        var filename = downloadBtn.getAttribute("data-download-filename") || "mcp.json";
+        var content = (jsonCodeEl.textContent || "").trim() + "\n";
+        var blob = new window.Blob([content], { type: "application/json;charset=utf-8" });
+        var blobUrl = window.URL.createObjectURL(blob);
+        var tempLink = document.createElement("a");
+        tempLink.href = blobUrl;
+        tempLink.download = filename;
+        document.body.appendChild(tempLink);
+        tempLink.click();
+        document.body.removeChild(tempLink);
+        window.setTimeout(function () {
+          window.URL.revokeObjectURL(blobUrl);
+        }, 1000);
+
+        downloadBtn.textContent = "Downloaded!";
+        window.setTimeout(function () {
+          updateDownloadButtonLabel(filename);
+        }, 1600);
+      });
+    }
+  }
+
   initExploreSearch();
   initChatForm();
+  initMcpSetup();
 })();

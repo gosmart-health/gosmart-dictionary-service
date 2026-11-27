@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, Form, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -60,6 +60,297 @@ _VALID_CHAT_SCOPES: Dict[str, ChatSearchScope] = {
     "clinical": "clinical",
     "dicom": "dicom",
 }
+
+MCP_SERVER_ALIAS = "gosmart-dictionary"
+MCP_API_KEY_PLACEHOLDER = "<YOUR_GOSMART_API_KEY>"
+
+_MCP_AGENT_TABS: Tuple[Dict[str, str], ...] = (
+    {"id": "cursor", "label": "Cursor", "filename": "mcp.json"},
+    {"id": "claude-code", "label": "Claude Code", "filename": ".mcp.json"},
+    {"id": "claude-desktop", "label": "Claude Desktop", "filename": "claude_desktop_config.json"},
+    {"id": "gemini", "label": "Gemini CLI", "filename": "settings.json"},
+    {"id": "antigravity", "label": "Antigravity", "filename": "mcp_config.json"},
+)
+_MCP_AGENT_ALIASES: Dict[str, str] = {
+    "cursor": "cursor",
+    "claude": "claude-code",
+    "claude-code": "claude-code",
+    "claude_code": "claude-code",
+    "claude-desktop": "claude-desktop",
+    "claude_desktop": "claude-desktop",
+    "gemini": "gemini",
+    "gemini-cli": "gemini",
+    "gemini_cli": "gemini",
+    "antigravity": "antigravity",
+}
+
+
+def normalize_mcp_agent(raw_agent: Optional[str]) -> str:
+    """Normalize an agent selector value to one of the supported profile keys."""
+    cleaned = (raw_agent or "").strip().lower()
+    return _MCP_AGENT_ALIASES.get(cleaned, "cursor")
+
+
+def _is_local_host_authority(authority: str) -> bool:
+    """Return True when ``authority`` targets loopback or a local dev host."""
+    host_part = authority.strip().lower()
+    if host_part.startswith("["):
+        bracket_end = host_part.find("]")
+        host_only = host_part[1:bracket_end] if bracket_end != -1 else host_part.lstrip("[")
+    else:
+        host_only = host_part.split(":", 1)[0]
+    return host_only in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "testserver"} or host_only.endswith(
+        (".local", ".localhost")
+    )
+
+
+def _resolve_default_server_origin(request: Request) -> str:
+    """Determine the default public origin for the current GoSmart DS instance."""
+    settings = get_settings()
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip()
+    if forwarded_host:
+        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+        scheme = (
+            forwarded_proto
+            if forwarded_proto in {"http", "https"}
+            else ("http" if _is_local_host_authority(forwarded_host) else "https")
+        )
+        return f"{scheme}://{forwarded_host}".rstrip("/")
+
+    configured_public = (settings.PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if configured_public and configured_public != "http://127.0.0.1:8081":
+        return configured_public
+
+    return str(request.base_url).rstrip("/")
+
+
+def normalize_mcp_endpoint_url(
+    raw_host: Optional[str],
+    default_origin: str,
+    mount_path: str = "/mcp",
+    sse_mount_path: str = "/mcp-sse",
+) -> Tuple[str, str]:
+    """Normalize a bare hostname, ``host:port``, or full URL into ``(origin_base, mcp_endpoint_url)``."""
+    candidate = (raw_host or "").strip() or default_origin.strip() or "http://127.0.0.1:8081"
+    candidate = candidate.rstrip("/")
+
+    lower_candidate = candidate.lower()
+    if not (lower_candidate.startswith("http://") or lower_candidate.startswith("https://")):
+        authority = candidate.split("/", 1)[0]
+        inferred_scheme = "http" if _is_local_host_authority(authority) else "https"
+        candidate = f"{inferred_scheme}://{candidate}"
+
+    parsed = urlsplit(candidate)
+    scheme = parsed.scheme.lower() if parsed.scheme else "https"
+    netloc = parsed.netloc
+    path = parsed.path.rstrip("/")
+
+    clean_mount = "/" + (mount_path or "/mcp").strip("/")
+    clean_sse = "/" + (sse_mount_path or "/mcp-sse").strip("/")
+    for suffix in (f"{clean_sse}/sse", clean_sse, clean_mount):
+        if suffix and path.lower().endswith(suffix.lower()):
+            path = path[: -len(suffix)].rstrip("/")
+            break
+
+    normalized_base = f"{scheme}://{netloc}{path}".rstrip("/")
+    endpoint_url = f"{normalized_base}{clean_mount}"
+    return normalized_base, endpoint_url
+
+
+def build_mcp_client_guide(
+    *,
+    agent: Optional[str],
+    raw_host: Optional[str],
+    default_origin: str,
+    api_key: Optional[str] = None,
+    mount_path: str = "/mcp",
+    sse_mount_path: str = "/mcp-sse",
+) -> Dict[str, Any]:
+    """Build the agent-specific MCP installation JSON, target file paths, and setup instructions."""
+    selected_agent = normalize_mcp_agent(agent)
+    normalized_base, endpoint_url = normalize_mcp_endpoint_url(
+        raw_host,
+        default_origin=default_origin,
+        mount_path=mount_path,
+        sse_mount_path=sse_mount_path,
+    )
+    host_input = (raw_host or "").strip() or normalized_base
+    clean_key = (api_key or "").strip()
+    has_real_key = bool(clean_key)
+    effective_key = clean_key if has_real_key else MCP_API_KEY_PLACEHOLDER
+
+    cli_command: Optional[str] = None
+    if selected_agent == "claude-code":
+        label = "Claude Code"
+        download_filename = ".mcp.json"
+        server_entry: Dict[str, Any] = {
+            "type": "http",
+            "url": endpoint_url,
+            "headers": {"X-API-Key": effective_key},
+        }
+        config_locations = [
+            {"scope": "Project (shared / repo root)", "path": ".mcp.json"},
+            {"scope": "Global (macOS / Linux)", "path": "~/.claude.json"},
+            {"scope": "Global (Windows)", "path": r"%USERPROFILE%\.claude.json"},
+        ]
+        merge_hint = (
+            'Save as .mcp.json in your project root, or merge the "gosmart-dictionary" entry inside '
+            'the existing "mcpServers" object in ~/.claude.json (or run the CLI command below).'
+        )
+        cli_command = (
+            f'claude mcp add --transport http {MCP_SERVER_ALIAS} {endpoint_url} --header "X-API-Key: {effective_key}"'
+        )
+        steps = [
+            "Place or merge the JSON into .mcp.json (project) or ~/.claude.json (global), "
+            "or run the claude mcp add command below.",
+            'Keep "type": "http" intact—Claude Code requires an explicit transport type for remote HTTP MCP servers.',
+            "Run /mcp inside an interactive Claude Code session to verify gosmart-dictionary is connected.",
+        ]
+    elif selected_agent == "claude-desktop":
+        label = "Claude Desktop"
+        download_filename = "claude_desktop_config.json"
+        server_entry = {
+            "command": "npx",
+            "args": [
+                "-y",
+                "mcp-remote",
+                endpoint_url,
+                "--header",
+                "X-API-Key:${GOSMART_API_KEY}",
+            ],
+            "env": {
+                "GOSMART_API_KEY": effective_key,
+            },
+        }
+        config_locations = [
+            {"scope": "macOS", "path": "~/Library/Application Support/Claude/claude_desktop_config.json"},
+            {"scope": "Windows", "path": r"%APPDATA%\Claude\claude_desktop_config.json"},
+            {"scope": "Linux", "path": "~/.config/Claude/claude_desktop_config.json"},
+        ]
+        merge_hint = (
+            "Open via Claude Desktop → Settings → Developer → Edit Config, and merge "
+            '"gosmart-dictionary" under "mcpServers".'
+        )
+        steps = [
+            "Ensure Node.js 18+ (npx) is installed—claude_desktop_config.json bridges remote HTTP "
+            "headers via mcp-remote.",
+            "Save or merge the JSON block into claude_desktop_config.json at your OS path above.",
+            "Restart Claude Desktop completely to load the GoSmart Dictionary tools.",
+        ]
+    elif selected_agent == "gemini":
+        label = "Gemini CLI"
+        download_filename = "settings.json"
+        server_entry = {
+            "httpUrl": endpoint_url,
+            "headers": {"X-API-Key": effective_key},
+        }
+        config_locations = [
+            {"scope": "Project (workspace)", "path": ".gemini/settings.json"},
+            {"scope": "Global (macOS / Linux)", "path": "~/.gemini/settings.json"},
+            {"scope": "Global (Windows)", "path": r"%USERPROFILE%\.gemini\settings.json"},
+        ]
+        merge_hint = (
+            'settings.json also stores general Gemini CLI settings—merge "gosmart-dictionary" inside '
+            'its "mcpServers" object rather than overwriting an existing settings.json '
+            "(or run the CLI command below)."
+        )
+        cli_command = (
+            f'gemini mcp add --transport http --header "X-API-Key: {effective_key}" {MCP_SERVER_ALIAS} {endpoint_url}'
+        )
+        steps = [
+            "Merge the JSON block into ~/.gemini/settings.json or .gemini/settings.json, "
+            "or run the gemini mcp add command below.",
+            'Keep "httpUrl" (Gemini CLI reserves "url" for legacy SSE) and the hyphenated alias "gosmart-dictionary".',
+            "Run /mcp inside an interactive gemini session to confirm gosmart-dictionary is active.",
+        ]
+    elif selected_agent == "antigravity":
+        label = "Antigravity"
+        download_filename = "mcp_config.json"
+        server_entry = {
+            "serverUrl": endpoint_url,
+            "headers": {"X-API-Key": effective_key},
+        }
+        config_locations = [
+            {"scope": "Workspace", "path": ".agents/mcp_config.json"},
+            {"scope": "Global (macOS / Linux)", "path": "~/.gemini/config/mcp_config.json"},
+            {"scope": "Global (Windows)", "path": r"%USERPROFILE%\.gemini\config\mcp_config.json"},
+        ]
+        merge_hint = (
+            "Save directly as .agents/mcp_config.json for a single workspace, or merge "
+            '"gosmart-dictionary" under "mcpServers" in ~/.gemini/config/mcp_config.json '
+            "(also accessible via MCP Servers → Manage MCP Servers → View raw config)."
+        )
+        steps = [
+            "Open MCP Servers → Manage MCP Servers → View raw config in Antigravity, "
+            "or open ~/.gemini/config/mcp_config.json (or <workspace>/.agents/mcp_config.json).",
+            'Merge "gosmart-dictionary" under "mcpServers" and save '
+            '(Antigravity uses "serverUrl" and does not accept Gemini CLI\'s "httpUrl").',
+            "Refresh MCP servers in Antigravity to load the 15 GoSmart Dictionary tools.",
+        ]
+    else:
+        label = "Cursor"
+        download_filename = "mcp.json"
+        server_entry = {
+            "url": endpoint_url,
+            "headers": {"X-API-Key": effective_key},
+        }
+        config_locations = [
+            {"scope": "Project (workspace)", "path": ".cursor/mcp.json"},
+            {"scope": "Global (macOS / Linux)", "path": "~/.cursor/mcp.json"},
+            {"scope": "Global (Windows)", "path": r"%USERPROFILE%\.cursor\mcp.json"},
+        ]
+        merge_hint = (
+            'Save directly as a new mcp.json file, or merge "gosmart-dictionary" inside '
+            'your existing "mcpServers" object.'
+        )
+        steps = [
+            "Save or merge the JSON into .cursor/mcp.json (project) or ~/.cursor/mcp.json (global), "
+            "or open Cursor Settings → Tools & MCP.",
+            "Save the file and confirm gosmart-dictionary shows a green status indicator.",
+            'Ask Cursor a terminology or DICOM question (e.g. "Search SNOMED for acute pneumonia").',
+        ]
+
+    config_payload = {"mcpServers": {MCP_SERVER_ALIAS: server_entry}}
+    json_config = json.dumps(config_payload, indent=2)
+    download_query = f"agent={quote(selected_agent)}&mcp_host={quote(host_input)}"
+
+    return {
+        "agent": selected_agent,
+        "agent_label": label,
+        "agent_tabs": [dict(tab) for tab in _MCP_AGENT_TABS],
+        "server_alias": MCP_SERVER_ALIAS,
+        "host_input": host_input,
+        "normalized_origin": normalized_base,
+        "endpoint_url": endpoint_url,
+        "has_real_key": has_real_key,
+        "api_key_placeholder": MCP_API_KEY_PLACEHOLDER,
+        "download_filename": download_filename,
+        "download_url": f"/keys/mcp-config.json?{download_query}",
+        "config_locations": config_locations,
+        "merge_hint": merge_hint,
+        "cli_command": cli_command,
+        "steps": steps,
+        "json_config": json_config,
+    }
+
+
+def _build_request_mcp_guide(
+    request: Request,
+    *,
+    agent: Optional[str] = None,
+    raw_host: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    settings = get_settings()
+    default_origin = _resolve_default_server_origin(request)
+    return build_mcp_client_guide(
+        agent=agent,
+        raw_host=raw_host,
+        default_origin=default_origin,
+        api_key=api_key,
+        mount_path=settings.MCP_MOUNT_PATH,
+        sse_mount_path=settings.MCP_SSE_MOUNT_PATH,
+    )
 
 
 def _wants_html(request: Request) -> bool:
@@ -276,15 +567,17 @@ async def home_page(
     """Serve the HTML home page to browsers, or JSON service metadata to API clients."""
     settings = get_settings()
     if not _wants_html(request):
-        return JSONResponse(
-            content={
-                "name": settings.APP_NAME,
-                "version": settings.APP_VERSION,
-                "docs_url": "/docs",
-                "api_v1": settings.API_V1_PREFIX,
-                "db_connection": settings.DB_CONNECTION_URI,
-            }
-        )
+        metadata: Dict[str, Any] = {
+            "name": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "docs_url": "/docs",
+            "api_v1": settings.API_V1_PREFIX,
+            "db_connection": settings.DB_CONNECTION_URI,
+        }
+        if settings.MCP_ENABLED:
+            metadata["mcp"] = settings.MCP_MOUNT_PATH
+            metadata["mcp_sse"] = settings.MCP_SSE_MOUNT_PATH
+        return JSONResponse(content=metadata)
     return _render(
         request,
         "home.html",
@@ -588,12 +881,21 @@ async def logout_submit(
 async def keys_page(
     request: Request,
     revoked: Optional[str] = Query(default=None),
+    agent: Optional[str] = Query(default=None),
+    mcp_host: Optional[str] = Query(default=None),
     current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
 ) -> Response:
     """Render the self-service API key management page for logged-in users."""
     if not current_user:
         return _redirect_to_login("/keys")
 
+    settings = get_settings()
+    mcp_guide = _build_request_mcp_guide(
+        request,
+        agent=agent,
+        raw_host=mcp_host,
+        api_key=None,
+    )
     keys = await user_service.list_api_keys(str(current_user["id"]), include_revoked=True)
     return _render(
         request,
@@ -603,10 +905,42 @@ async def keys_page(
             "keys": keys,
             "new_api_key": None,
             "new_api_key_name": None,
+            "mcp_enabled": settings.MCP_ENABLED,
+            "mcp_mount_path": settings.MCP_MOUNT_PATH,
+            "mcp_sse_mount_path": settings.MCP_SSE_MOUNT_PATH,
+            "mcp_guide": mcp_guide,
             "error": None,
             "notice": "API key revoked successfully." if revoked else None,
         },
         current_user=current_user,
+    )
+
+
+@web_router.get("/keys/mcp-config.json")
+async def keys_download_mcp_config(
+    request: Request,
+    agent: Optional[str] = Query(default=None),
+    mcp_host: Optional[str] = Query(default=None),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+) -> Response:
+    """Download the MCP client JSON file for the selected agent (progressive fallback)."""
+    if not current_user:
+        return _redirect_to_login("/keys")
+
+    mcp_guide = _build_request_mcp_guide(
+        request,
+        agent=agent,
+        raw_host=mcp_host,
+        api_key=None,
+    )
+    filename = str(mcp_guide["download_filename"])
+    return Response(
+        content=str(mcp_guide["json_config"]) + "\n",
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -615,6 +949,8 @@ async def keys_create_submit(
     request: Request,
     name: str = Form(default=""),
     expires_in_days: str = Form(default=""),
+    agent: str = Form(default="cursor"),
+    mcp_host: str = Form(default=""),
     csrf_token: str = Form(default=""),
     current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
 ) -> Response:
@@ -622,8 +958,15 @@ async def keys_create_submit(
     if not current_user:
         return _redirect_to_login("/keys")
 
+    settings = get_settings()
     csrf_err = _validate_csrf_or_error(request, csrf_token)
     if csrf_err:
+        mcp_guide = _build_request_mcp_guide(
+            request,
+            agent=agent,
+            raw_host=mcp_host,
+            api_key=None,
+        )
         keys = await user_service.list_api_keys(str(current_user["id"]), include_revoked=True)
         return _render(
             request,
@@ -633,6 +976,10 @@ async def keys_create_submit(
                 "keys": keys,
                 "new_api_key": None,
                 "new_api_key_name": None,
+                "mcp_enabled": settings.MCP_ENABLED,
+                "mcp_mount_path": settings.MCP_MOUNT_PATH,
+                "mcp_sse_mount_path": settings.MCP_SSE_MOUNT_PATH,
+                "mcp_guide": mcp_guide,
                 "error": csrf_err,
                 "notice": None,
             },
@@ -673,6 +1020,12 @@ async def keys_create_submit(
         new_key_name = str(created["name"])
         status_code = status.HTTP_201_CREATED
 
+    mcp_guide = _build_request_mcp_guide(
+        request,
+        agent=agent,
+        raw_host=mcp_host,
+        api_key=new_raw_key,
+    )
     keys = await user_service.list_api_keys(str(current_user["id"]), include_revoked=True)
     return _render(
         request,
@@ -682,6 +1035,10 @@ async def keys_create_submit(
             "keys": keys,
             "new_api_key": new_raw_key,
             "new_api_key_name": new_key_name,
+            "mcp_enabled": settings.MCP_ENABLED,
+            "mcp_mount_path": settings.MCP_MOUNT_PATH,
+            "mcp_sse_mount_path": settings.MCP_SSE_MOUNT_PATH,
+            "mcp_guide": mcp_guide,
             "error": error,
             "notice": None,
         },

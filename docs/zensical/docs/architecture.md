@@ -47,7 +47,7 @@ A primary consumer of this service is the sibling project **`gosmart-graphite`**
    - *Resolution:* Resolves candidate concepts in SNOMED CT (`http://snomed.info/sct|59282003|Pulmonary embolism`) and ICD-10-CM (`http://hl7.org/fhir/sid/icd-10-cm|I26.99|...`), emitting ready-to-bind FHIR `Coding` objects and `gosmart-graphite` Coding Macro prefixes.
 3. **Subsumption Expansion & Cross-Vocabulary Bridging**
    - Clinical records rarely use a single code: one hospital records SNOMED CT `709044004` (*Chronic kidney disease*), another records a specific stage subtype (`431855005`, *CKD stage 1*), and billing records store ICD-10-CM `N18.1`.
-   - Given a root concept, the Ontology Graph API expands `:IS_A` descendants (to a configurable depth) and follows `:MAPS_TO` cross-walks so `gosmart-graphite` Cypher queries match the complete clinical concept family in a single predicate list.
+   - Given a root concept, the Ontology Graph / MCP API expands `:IS_A` descendants (to a configurable depth) and follows `:MAPS_TO` cross-walks so `gosmart-graphite` Cypher queries match the complete clinical concept family in a single predicate list.
 
 ```mermaid
 sequenceDiagram
@@ -57,8 +57,8 @@ sequenceDiagram
     participant NeoDS as Dictionary Standalone Neo4j
 
     User->>GS: "Find chest CT studies for patients with viral pneumonia"
-    GS->>DS: resolve_dicom_elements("chest CT") + resolve_clinical_codes("viral pneumonia", expand_descendants=true)
-    DS->>NeoDS: Hybrid Search (Lexical + HNSW Vector) + :IS_A / :MAPS_TO Traversal
+    GS->>DS: search_dictionary("chest CT", scope="dicom") + search_dictionary("viral pneumonia", scope="clinical", include_related=true) + expand_descendants(...)
+    DS->>NeoDS: Hybrid Search (NLU + Lexical + HNSW Vector) + :IS_A / :MAPS_TO Traversal
     NeoDS-->>DS: Modality="CT", BodyPart="CHEST", SNOMED + ICD-10/11 Coding Macros
     DS-->>GS: Grounded DICOM tags/values + expanded FHIR Coding Macro set
     GS->>GS: Execute deterministic Cypher / QIDO-RS over patient DICOM+FHIR graph
@@ -83,7 +83,7 @@ flowchart TD
 
     subgraph Interfaces["Interfaces"]
         REST["FastAPI REST API (/api/v1)"]
-        MCP["MCP Server (StreamableHTTP / SSE / STDIO)"]
+        MCP["MCP Server (/mcp StreamableHTTP, /mcp-sse, STDIO)"]
         CLI["CLI (gosmart-ds / gosmart-dictionary-service)"]
     end
 
@@ -92,7 +92,7 @@ flowchart TD
         NLU_SVC["Clinical NLU Service (spaCy + Reverse-Lookup + LLM Expansion)"]
         HYBRID["Hybrid Search Service (Exact + Fulltext + HNSW)"]
         GRAPH_SVC["Ontology Traversal & Crosswalk Service"]
-        GENKIT["Genkit Flows (Phrase Synthesis & NL Grounding)"]
+        GENKIT["Genkit Flows (Phrase Synthesis & Grounded AI Chat)"]
     end
 
     subgraph GraphStore["Standalone Neo4j Knowledge Graph (No PHI)"]
@@ -140,14 +140,14 @@ flowchart TD
 | **Edge & Abuse Protection** | Cloudflare + FastAPI Rate-Limit Middleware | Cloudflare WAF / L3–L7 DDoS protection + per-key `X-API-Key` quotas |
 | **Registration & Email** | `argon2-cffi`, `httpx` + **Brevo API** | Email + password registration with Brevo email confirmation |
 | **HTTP API** | `fastapi` + `uvicorn[standard]` | Versioned under `/api/v1` |
-| **MCP Server** | `mcp` Python SDK | `StreamableHTTP`, `SSE`, and `STDIO` transports |
-| **CLI** | `typer` + `rich` | Entry points: `gosmart-dictionary-service`, `gosmart-ds` |
+| **MCP Server** | `mcp` Python SDK (`>=2.3,<3`) | Streamable HTTP (`/mcp`), SSE (`/mcp-sse`), and CLI `STDIO` transports with stateful `MCPSessionContextStore` |
+| **CLI** | `argparse` (`__main__.py`) | Entry points: `gosmart-dictionary-service`, `gosmart-ds` (`serve`, `mcp`, `bootstrap`, `ingest-dicom`, `ingest-clinical-terms`) |
 | **Graph & Vector Store** | Standalone `neo4j` (`>=6.4`) | Dedicated non-PHI graph + Full-Text (Lucene) + native HNSW Vector Index |
 | **Clinical NLU** | `gosmart-clinical-nlu` (spaCy `textcat` + `entity_ruler`) | Trained `find_coding_schema` bundle (`nlu_models/intent_models.zip`) + dynamic DB schema alerts |
 | **LLM & Embeddings** | `genkit` (`genkit-google-genai`, `genkit-ollama`) | Dynamic provider resolution via system `:LLM_Config` (`embedding-v1` & `inference-v1`, e.g. `gemma4:e2b`) |
 | **Offline GNN Pipeline** | PyTorch + PyTorch Geometric (`train` group) | Offline structural embedding job (runs on Apple M5 MPS or 6 GB CUDA GPU) |
 | **Concurrency** | `pykka` Actor Model | Non-blocking bulk terminology ingestion and background batch embedding |
-| **Configuration & Logs** | `pydantic-settings` (`GOSMART_DS_*`), `structlog` | `.env` + `tests/.env` resolution; rotating JSON/console logs |
+| **Configuration & Logs** | `pydantic-settings` (`GOSMART_DS_*`), `structlog` | `.env` + `tests/.env` resolution; rotating JSON/console logs (`stderr` stream on MCP `stdio`) |
 | **Documentation** | `zensical` (`docs` dependency group) | Hosted docs and local live preview under `docs/zensical/` |
 
 ### 3.3 Core Architectural Policies
@@ -177,7 +177,7 @@ Because `gosmart-dictionary-service` contains no PHI, it operates as a **rate-li
    - The service dispatches a time-limited verification token link via the **Brevo Transactional Email API** (`POST https://api.brevo.com/v3/smtp/email` authenticated via `GOSMART_DS_BREVO_API_KEY`).
    - Upon email confirmation (`email_verified=True`), the registrant can log in with email + password to generate, inspect, rotate, or revoke their API keys (and use Brevo for password-reset emails).
 3. **Lightweight Header API Key (`X-API-Key`) & Tiered Quotas**
-   - API keys (`gs_dict_<prefix>_<secret>`, stored as a SHA-256 hash on `:ApiKey` nodes linked via `(:User)-[:HAS_API_KEY]->(:ApiKey)`) are passed in the `X-API-Key` request header on REST (`/api/v1/...`) and remote MCP (`StreamableHTTP` / `SSE`) requests.
+   - API keys (`gs_dict_<prefix>_<secret>`, stored as a SHA-256 hash on `:ApiKey` nodes linked via `(:User)-[:HAS_API_KEY]->(:ApiKey)`) are passed in the `X-API-Key` request header on REST (`/api/v1/...`) and remote MCP (`StreamableHTTP` `/mcp` and `SSE` `/mcp-sse`) requests.
    - **Public Registrant Tier:** Generous sliding-window quota for deterministic graph/lexical lookups and a stricter token-bucket quota for vector/Genkit-assisted natural-language resolution (`POST .../resolve`), returning standard `429 Too Many Requests` (`Retry-After` / `X-RateLimit-*`) headers when exceeded.
    - **Trusted Platform Tier (`gosmart-graphite`):** Sibling services use an `INTERNAL_SERVICE` tier key with elevated/unmetered throughput.
 
@@ -384,6 +384,10 @@ To guarantee **zero hallucinated codes** while aiding cross-domain discovery acr
 - `GET /api/v1/auth/keys` / `DELETE /api/v1/auth/keys/{key_id}` — List active key prefixes/usage or revoke a key.
 - `POST /api/v1/auth/password-reset/request` & `POST /api/v1/auth/password-reset/confirm` — Self-service password recovery via Brevo transactional email.
 
+#### Grounded Dictionary AI Chat API (`/api/v1/chat`)
+
+- `POST /api/v1/chat` — Natural-language clinical terminology and DICOM assistant backed by `DictionaryChatService` (`scope="auto" | "clinical" | "dicom"`, `include_related`, NLU routing metadata, warnings, and drill-down FHIR citations; authenticated via session cookie, JWT Bearer token, or `X-API-Key`).
+
 #### Terminology Dictionary API (`/api/v1/dictionary` — requires `X-API-Key`)
 
 Returns the FHIR-aligned `{coding, macro, properties}` envelope by default (with optional `?format=compact`; see [Section 4.2](#42-terminology-encoding-response-contract)):
@@ -402,26 +406,37 @@ Returns the FHIR-aligned `{coding, macro, properties}` envelope by default (with
 - `POST /api/v1/ontology/crosswalk` — Translate concepts across code systems (e.g., `ICD10CM` → `SNOMED`, `SNOMED` → `ICD11`) via direct and 2-hop `:MAPS_TO` paths.
 - `GET /api/v1/ontology/subsumes` — Test whether Concept A subsumes Concept B (`A == B` or `(B)-[:IS_A*1..]->(A)`), aligned with FHIR Terminology Service `$subsumes` semantics.
 
-#### MCP Server Tools (`gosmart-dictionary-service`)
+#### MCP Server Tools & Interactive Sessions (`gosmart-dictionary-service`)
 
-Exposed over `StreamableHTTP` and `SSE` (authenticated via `X-API-Key` header) as well as local `STDIO` for `gosmart-graphite` agents and IDE/clinical AI assistants. Lookup and resolution tools default to `format="compact"` and accept `format="fhir"` to return the full `{coding, macro, properties}` envelope:
+Exposed over **Streamable HTTP** (`/mcp` and `/mcp/` without `307` redirects), **SSE** (`/mcp-sse`), and local **`STDIO`** (`gosmart-ds mcp`) for `gosmart-graphite` agents and IDE/clinical AI assistants. Remote HTTP/SSE mounts are guarded by `MCPAuthMiddleware` (`X-API-Key`, `Authorization: Bearer gs_dict_...`, JWT `Bearer`, or browser session cookie) with automatic `mcp-session-id` / SSE `session_id` binding.
 
-- `resolve_dicom_elements(query, modality=None, ciod=None, limit=10, format="compact")`
-- `lookup_dicom_tag(tag_or_keyword, format="compact")`
-- `resolve_clinical_codes(query, vocabularies=None, domain=None, expand_descendants=False, max_depth=2, limit=10, format="compact")`
-- `explore_ontology_neighborhood(vocabulary, code, max_depth=1, include_mappings=True)`
-- `expand_concept_descendants(vocabulary, code, max_depth=3, limit=200, format="compact")`
-- `translate_code_crosswalk(source_vocabulary, source_code, target_vocabularies, format="compact")`
-- `dictionary_health_check()`
+Stateful interactive sessions (`MCPSessionContextStore`, bounded by `GOSMART_DS_MCP_SESSION_TTL_SEC`, `GOSMART_DS_MCP_MAX_SESSIONS`, and `GOSMART_DS_MCP_MAX_HISTORY_TURNS`) isolate memory by `(user_scope, session_id)` and retain sticky `scope`, `recent_entities`, and multi-turn `chat_history` across calls. Lookup and resolution tools default to `format="compact"` and accept `format="fhir"` to return the full `{coding, macro, properties}` envelope:
+
+1. **Core `/web`-Mirrored Natural-Language & Explorer Tools**
+   - `search_dictionary(query, scope=None, entity_types=None, vocabularies=None, domains=None, valid_only=True, standard_only=False, include_related=False, related_direction="both", related_limit=12, rerank_with_embeddings=True, expand_with_llm=None, limit=10, format="compact", session_id=None)` — Mirrors `/explore` natural-language and code-aware hybrid search, caching top hits in the session context.
+   - `ask_dictionary_ai(message, scope=None, include_context=True, include_related=False, context_limit=8, use_session_context=True, reset_session=False, format="compact", session_id=None)` — Mirrors `/chat` grounded Genkit Q&A, merging fresh Neo4j hits with prior session entities and multi-turn history.
+   - `inspect_entity(code=None, vocabulary=None, entity_type=None, node_id=None, related_limit=40, include_graph=False, format="compact", session_id=None)` — Mirrors `/explore` entity drill-down with categorized `hierarchy`, `crosswalks`, `attributes`, and `dicom_links` relationship groups (plus optional graph `nodes`/`edges`).
+2. **Granular `SearchService` & Ontology Traversal Tools**
+   - `lookup_concept(vocabulary, code, resolve_deprecated=True, include_related=False, related_direction="both", include_shared_attributes=True, related_limit=12, format="compact", session_id=None)`
+   - `lookup_dicom(tag_or_keyword, include_related=False, related_limit=12, format="compact", session_id=None)`
+   - `find_related_concepts(vocabulary, code, direction="both", include_shared_attributes=True, valid_only=True, min_shared_axes=2, limit=20, format="compact")`
+   - `expand_descendants(vocabulary, code, max_depth=2, valid_only=True, limit=100, format="compact")`
+   - `crosswalk_codes(vocabulary, code, target_vocabularies=None, max_hops=2, limit=25, format="compact")`
+   - `check_subsumption(ancestor_vocabulary, ancestor_code, descendant_vocabulary, descendant_code, max_depth=10)`
+3. **Interactive Session Management, Health & Admin `:LLM_Config` Tools**
+   - `manage_mcp_session(action="status", scope=None, session_id=None)` — Supports `"status"`, `"set_scope"` (`"auto" | "clinical" | "dicom"`), and `"clear"`.
+   - `dictionary_health_check()` — Reports Neo4j connectivity, loaded coding schemas, active LLM tags, and MCP session store stats.
+   - `list_llm_configurations(group_id=None, group_code=None, include_deleted=False)` & `get_llm_configuration(tag, group_id=None, group_code=None)` — Inspect group-scoped `:LLM_Config` records with secret keys masked.
+   - `upsert_llm_configuration(...)` & `delete_llm_configuration(config_id)` — Role-gated (`PLATFORM_ADMIN` / `ADMIN` over HTTP/SSE) `:LLM_Config` management.
 
 ### 5.4 CLI (`gosmart-dictionary-service` / `gosmart-ds`)
 
-- `gosmart-ds serve` — Launch the FastAPI + MCP server.
+- `gosmart-ds serve` — Launch the FastAPI + remote MCP (`/mcp`, `/mcp-sse`) server.
+- `gosmart-ds mcp [--transport stdio|streamable-http|sse] [--host 127.0.0.1] [--port 8082]` — Launch the standalone MCP server (`stdio` default with logs routed to `stderr` for local IDE/desktop MCP clients).
+- `gosmart-ds bootstrap` — Apply idempotent Neo4j constraints/indexes and seed `:System`, root `GoSmart Health` `:Group`, and default `:LLM_Config` nodes.
 - `gosmart-ds ingest-dicom` / `gosmart-ds ingest-clinical-terms` — Run idempotent Pykka actor ingestion pipelines (`--profile full|valid|demo-core`, `--dry-run`, `--bootstrap`, `--compute-embeddings`) from local source directories.
-- `gosmart-ds embed` — Trigger or resume incremental text `:Embedding` generation across unembedded `:Concept` and `:DicomElement` nodes for a specified `:LLM_Config` tag.
+- `gosmart-ds embed` *(planned)* — Trigger or resume incremental text `:Embedding` generation across unembedded `:Concept` and `:DicomElement` nodes for a specified `:LLM_Config` tag.
 - `gosmart-ds train-gnn` *(optional `train` group)* — Export ontology topology + text features, train GraphSAGE / R-GCN on local MPS/CUDA, and write structural `:Embedding` nodes back to Neo4j.
-- `gosmart-ds apikey <issue|revoke|list>` — Admin CLI to provision, inspect, or revoke `X-API-Key` credentials (including `INTERNAL_SERVICE` keys for `gosmart-graphite`).
-- `gosmart-ds configure llm-config --file <path>` — Register or update system `:LLM_Config` provider settings in Neo4j.
 
 ---
 
@@ -447,4 +462,4 @@ Due to `gosmart-graphite` already using the system default port numbers for
 | --- | --- | --- |
 | `neo4j local bolt port` | Neo4j container name | 7688 |
 | `neo4j local web port` | Neo4j Web access | 7475 |
-| `API Endpoint` | Primary DICOM dictionary source | 8081|
+| `API Endpoint` | Primary DICOM & clinical dictionary API + MCP HTTP port | 8081 |

@@ -28,6 +28,13 @@ Configuration is loaded from `.env` (and environment variables prefixed with
 | `GOSMART_DS_PORT` | `8081` | FastAPI HTTP port |
 | `GOSMART_DS_RELOAD` | `true` | Uvicorn auto-reload |
 | `GOSMART_DS_DEV_MODE` | `false` | Allow startup if Neo4j is unreachable; enables local verification link fallback when `GOSMART_DS_BREVO_API_KEY` is unset |
+| `GOSMART_DS_MCP_ENABLED` | `true` | Mount Model Context Protocol (MCP) Streamable HTTP and SSE transports on FastAPI |
+| `GOSMART_DS_MCP_MOUNT_PATH` | `/mcp` | FastAPI mount path for Streamable HTTP MCP transport (serves both `/mcp` and `/mcp/` without redirect) |
+| `GOSMART_DS_MCP_SSE_MOUNT_PATH` | `/mcp-sse` | FastAPI mount path for Server-Sent Events (SSE) MCP transport |
+| `GOSMART_DS_MCP_SESSION_TTL_SEC` | `3600` | Sliding idle TTL (seconds) for interactive MCP session context and HTTP session auth bindings |
+| `GOSMART_DS_MCP_MAX_SESSIONS` | `500` | Maximum active interactive MCP session contexts retained in memory (LRU eviction) |
+| `GOSMART_DS_MCP_MAX_HISTORY_TURNS` | `20` | Maximum conversational messages stored per interactive MCP session (`2`–`100`) |
+| `GOSMART_DS_MCP_ALLOWED_HOSTS` | *(unset)* | Optional comma-separated extra `Host` header patterns permitted by MCP DNS-rebinding protection (e.g., `dictionary.gosmart.health,*.gosmart.health`) |
 | `GOSMART_DS_DB_CONNECTION_URI` | `bolt://localhost:7688` | Dedicated Neo4j Bolt URI |
 | `GOSMART_DS_VECTOR_EMBED_PROVIDER` | `ollama` | Default embedding provider (`ollama`, `vertexai`, `googleai`) |
 | `GOSMART_DS_VECTOR_EMBED_SERVER_URL` | `http://localhost:11434` | Default Ollama/custom embedding server URL |
@@ -64,23 +71,28 @@ Configuration is loaded from `.env` (and environment variables prefixed with
 | `GOSMART_DS_LOG_BACKUP_COUNT` | `8` | Number of rotated backups retained |
 | `GOSMART_DS_LOG_TO_FILE` | `true` | Enable rotating JSON file logging |
 
-## Running the API server
+## Running the API & MCP server
 
 ```bash
-# Start the API server (default port 8081)
+# Start the API + remote MCP server (default port 8081; mounts /mcp and /mcp-sse)
 uv run python -m gosmart_dictionary_service
 # ...or explicitly via CLI
 uv run gosmart-ds serve
+
+# Start standalone MCP server over STDIO (for Claude Desktop, Cursor, PyCharm, or local agents)
+uv run gosmart-ds mcp
+# ...or run standalone Streamable HTTP / SSE MCP transport
+uv run gosmart-ds mcp --transport streamable-http --host 127.0.0.1 --port 8082
 ```
 
-### Web Portal & Endpoints
+### Web Portal, REST & MCP Endpoints
 
 - **Web Portal (Multi-Page HTML)**:
-  - Home: <http://127.0.0.1:8081/> (serves HTML to browsers; returns JSON service metadata when `Accept: application/json` or default `*/*` is requested)
+  - Home: <http://127.0.0.1:8081/> (serves HTML to browsers; returns JSON service metadata including `mcp` and `mcp_sse` paths when `Accept: application/json` or default `*/*` is requested)
   - Account Registration: <http://127.0.0.1:8081/register>
   - Email Verification: <http://127.0.0.1:8081/verify-email>
   - Log In: <http://127.0.0.1:8081/login>
-  - API Key Management: <http://127.0.0.1:8081/keys>
+  - API Key Management & MCP Client Setup: <http://127.0.0.1:8081/keys> (interactive **Connect an MCP Agent** configurator providing target config paths, **Copy JSON**, **Download JSON**, and short instructions for **Cursor**, **Claude Code**, **Claude Desktop**, **Gemini CLI**, and **Antigravity**)
   - Grounded Dictionary AI Chat: <http://127.0.0.1:8081/chat> (unified Clinical + DICOM NLU grounding with scope selector, related-concept toggle, and collapsible tabular FHIR citations)
   - Ontology & Dictionary Explorer: <http://127.0.0.1:8081/explore> (entity drill-down inspector with FHIR coding macros, categorized relationship tables, and Graph-UI-ready neighborhood JSON)
 - **REST API & Docs**:
@@ -88,6 +100,11 @@ uv run gosmart-ds serve
   - Health endpoint: <http://127.0.0.1:8081/api/v1/health>
   - Auth & API Keys: `/api/v1/auth/register`, `/api/v1/auth/verify-email`, `/api/v1/auth/login`, `/api/v1/auth/me`, `/api/v1/auth/keys`
   - AI Chat: `POST /api/v1/chat` (supports `scope` = `auto` | `clinical` | `dicom`, `include_related`, NLU routing metadata, warnings, and drill-down citations; authenticated via session cookie, JWT Bearer token, or `X-API-Key`)
+- **MCP Server Transports & Interactive Sessions**:
+  - Streamable HTTP: `http://127.0.0.1:8081/mcp` (serves both `/mcp` and `/mcp/` directly without `307` redirects)
+  - SSE: `http://127.0.0.1:8081/mcp-sse`
+  - Local STDIO: `uv run gosmart-ds mcp`
+  - Authenticate remote `/mcp` and `/mcp-sse` calls with `X-API-Key: gs_dict_...`, `Authorization: Bearer gs_dict_...`, JWT `Authorization: Bearer <token>`, or a web session cookie. Interactive sessions preserve `recent_entities`, multi-turn `chat_history`, and sticky `scope` across tool calls (`search_dictionary`, `ask_dictionary_ai`, `inspect_entity`, `manage_mcp_session`).
 
 The template requests in `test_main.http` can be run from the IDE HTTP client
 against a running server.
@@ -180,8 +197,8 @@ gosmart-dictionary-service/
 ├── src/
 │   └── gosmart_dictionary_service/    # Importable package (src layout)
 │       ├── __init__.py                # Package docstring + __version__
-│       ├── __main__.py                # CLI (`gosmart-ds serve | bootstrap | ingest-dicom | ingest-clinical-terms`)
-│       ├── main.py                    # FastAPI app factory, lifespan, static assets & web mount
+│       ├── __main__.py                # CLI (`gosmart-ds serve | mcp | bootstrap | ingest-dicom | ingest-clinical-terms`)
+│       ├── main.py                    # FastAPI app factory, lifespan, MCP mounts, static assets & web mount
 │       ├── core/                      # Settings (`GOSMART_DS_*`), security, auth deps & structlog
 │       ├── db/                        # Neo4j async/sync driver & Cypher schema loader/DDL
 │       ├── api/                       # Versioned REST endpoints (`/api/v1/health`, `/auth`, `/chat`)
@@ -190,7 +207,7 @@ gosmart-dictionary-service/
 │       ├── ingestor/                  # Batched Neo4j dictionary ingesters (DicomIngesterService, ClinicalTermsIngesterService)
 │       ├── model/                     # Pydantic domain models (System, Auth, LLM_Config, Embedding, Search, DICOM, Clinical)
 │       ├── nlu/                       # External `gosmart-clinical-nlu` intent specs (`find_coding_schema`)
-│       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding, Search, ClinicalNLU)
+│       └── service/                   # Core business services (System, User, Email, Chat, LLMConfig, Embedding, Search, ClinicalNLU, MCP)
 ├── tests/
 │   ├── conftest.py                    # Shared fixtures (TestClient)
 │   ├── unit/                          # Unit tests

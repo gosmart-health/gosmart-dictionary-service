@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import json
 import re
 from typing import Any, Optional
 
@@ -24,6 +26,11 @@ from gosmart_dictionary_service.model.search import (
     build_drilldown_url,
 )
 from gosmart_dictionary_service.service.chat_service import ChatNLUSummary, ChatResponse, search_hit_to_citation
+from gosmart_dictionary_service.web.router import (
+    MCP_API_KEY_PLACEHOLDER,
+    build_mcp_client_guide,
+    normalize_mcp_endpoint_url,
+)
 from tests.unit.test_auth_api import _patch_services
 
 
@@ -523,3 +530,214 @@ def test_explore_and_chat_loading_indicator_markup_and_assets(
     assert "setButtonLoading" in js.text
     assert "createStageTicker" in js.text
     assert 'addEventListener("pageshow"' in js.text
+    assert "initMcpSetup" in js.text
+
+
+def test_mcp_url_normalization_and_agent_guides() -> None:
+    # Bare remote domain -> https://<domain>/mcp
+    assert normalize_mcp_endpoint_url("dictionary.gosmart.health", "http://127.0.0.1:8081") == (
+        "https://dictionary.gosmart.health",
+        "https://dictionary.gosmart.health/mcp",
+    )
+    # Bare loopback host:port -> http://<host:port>/mcp
+    assert normalize_mcp_endpoint_url("127.0.0.1:8081", "https://dictionary.gosmart.health") == (
+        "http://127.0.0.1:8081",
+        "http://127.0.0.1:8081/mcp",
+    )
+    assert normalize_mcp_endpoint_url("localhost:8081/", "https://dictionary.gosmart.health") == (
+        "http://localhost:8081",
+        "http://localhost:8081/mcp",
+    )
+    # Full URL with duplicate /mcp or /mcp-sse/sse stripped cleanly (preserving reverse-proxy subpaths)
+    assert normalize_mcp_endpoint_url("https://dict.gosmart.health/mcp/", "http://127.0.0.1:8081") == (
+        "https://dict.gosmart.health",
+        "https://dict.gosmart.health/mcp",
+    )
+    assert normalize_mcp_endpoint_url("https://gosmart.health/dictionary/mcp-sse/sse", "http://127.0.0.1:8081") == (
+        "https://gosmart.health/dictionary",
+        "https://gosmart.health/dictionary/mcp",
+    )
+
+    sample_key = "gs_dict_a1b2c3d4_testsecret"
+
+    # 1. Cursor ("url" + mcp.json)
+    cursor_guide = build_mcp_client_guide(
+        agent="cursor",
+        raw_host="dict.gosmart.health",
+        default_origin="http://127.0.0.1:8081",
+        api_key=sample_key,
+    )
+    assert cursor_guide["download_filename"] == "mcp.json"
+    assert any(loc["path"] == "~/.cursor/mcp.json" for loc in cursor_guide["config_locations"])
+    cursor_json = json.loads(cursor_guide["json_config"])
+    assert cursor_json["mcpServers"]["gosmart-dictionary"] == {
+        "url": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": sample_key},
+    }
+
+    # 2. Claude Code ("claude" alias -> "claude-code", "type": "http" + .mcp.json + CLI one-liner)
+    claude_code_guide = build_mcp_client_guide(
+        agent="claude",
+        raw_host="dict.gosmart.health",
+        default_origin="http://127.0.0.1:8081",
+        api_key=sample_key,
+    )
+    assert claude_code_guide["agent"] == "claude-code"
+    assert claude_code_guide["download_filename"] == ".mcp.json"
+    assert "claude mcp add --transport http" in str(claude_code_guide["cli_command"])
+    assert any(loc["path"] == ".mcp.json" for loc in claude_code_guide["config_locations"])
+    claude_code_json = json.loads(claude_code_guide["json_config"])
+    assert claude_code_json["mcpServers"]["gosmart-dictionary"] == {
+        "type": "http",
+        "url": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": sample_key},
+    }
+
+    # 3. Claude Desktop (npx mcp-remote bridge + claude_desktop_config.json)
+    claude_desktop_guide = build_mcp_client_guide(
+        agent="claude-desktop",
+        raw_host="dict.gosmart.health",
+        default_origin="http://127.0.0.1:8081",
+        api_key=sample_key,
+    )
+    assert claude_desktop_guide["download_filename"] == "claude_desktop_config.json"
+    claude_desktop_json = json.loads(claude_desktop_guide["json_config"])
+    desktop_srv = claude_desktop_json["mcpServers"]["gosmart-dictionary"]
+    assert desktop_srv["command"] == "npx"
+    assert "mcp-remote" in desktop_srv["args"]
+    assert "https://dict.gosmart.health/mcp" in desktop_srv["args"]
+    assert desktop_srv["env"]["GOSMART_API_KEY"] == sample_key
+
+    # 4. Gemini CLI ("httpUrl" + settings.json + gemini mcp add CLI one-liner)
+    gemini_guide = build_mcp_client_guide(
+        agent="gemini",
+        raw_host="dict.gosmart.health",
+        default_origin="http://127.0.0.1:8081",
+        api_key=sample_key,
+    )
+    assert gemini_guide["download_filename"] == "settings.json"
+    assert "gemini mcp add --transport http" in str(gemini_guide["cli_command"])
+    assert any(loc["path"] == "~/.gemini/settings.json" for loc in gemini_guide["config_locations"])
+    gemini_json = json.loads(gemini_guide["json_config"])
+    assert gemini_json["mcpServers"]["gosmart-dictionary"] == {
+        "httpUrl": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": sample_key},
+    }
+
+    # 5. Antigravity ("serverUrl" — distinct from Gemini CLI's "httpUrl" — + mcp_config.json)
+    antigravity_guide = build_mcp_client_guide(
+        agent="antigravity",
+        raw_host="dict.gosmart.health",
+        default_origin="http://127.0.0.1:8081",
+        api_key=None,
+    )
+    assert antigravity_guide["download_filename"] == "mcp_config.json"
+    assert antigravity_guide["has_real_key"] is False
+    assert any(loc["path"] == "~/.gemini/config/mcp_config.json" for loc in antigravity_guide["config_locations"])
+    assert any(loc["path"] == ".agents/mcp_config.json" for loc in antigravity_guide["config_locations"])
+    antigravity_json = json.loads(antigravity_guide["json_config"])
+    assert antigravity_json["mcpServers"]["gosmart-dictionary"] == {
+        "serverUrl": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": MCP_API_KEY_PLACEHOLDER},
+    }
+
+
+def test_keys_page_mcp_configurator_paths_download_and_one_time_key_injection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_services(monkeypatch, dev_mode=True)
+
+    # Unauthenticated download endpoint redirects to /login
+    unauth_dl = client.get("/keys/mcp-config.json?agent=cursor", follow_redirects=False)
+    assert unauth_dl.status_code == 303
+    assert unauth_dl.headers["location"] == "/login?next=/keys"
+
+    # Register, verify, and log in a modular test user
+    reg_csrf = _extract_csrf(client.get("/register").text)
+    reg_ok = client.post(
+        "/register",
+        data={
+            "email": "mcp-config-user@example.org",
+            "display_name": "MCP Config User",
+            "password": "StrongPassword123!",
+            "password_confirm": "StrongPassword123!",
+            "terms_accepted": "on",
+            "csrf_token": reg_csrf,
+        },
+    )
+    verify_match = re.search(r"/verify-email\?token=([A-Za-z0-9_\-]+)", reg_ok.text)
+    assert verify_match is not None
+    client.get(verify_match.group(0))
+    login_csrf = _extract_csrf(client.get("/login").text)
+    client.post(
+        "/login",
+        data={
+            "email": "mcp-config-user@example.org",
+            "password": "StrongPassword123!",
+            "next_url": "/keys",
+            "csrf_token": login_csrf,
+        },
+        follow_redirects=False,
+    )
+
+    # 1. GET /keys with Antigravity + custom hostname shows paths, Copy JSON, Download mcp_config.json & placeholder
+    ag_page = client.get("/keys?agent=antigravity&mcp_host=dict.gosmart.health")
+    assert ag_page.status_code == 200
+    assert 'id="mcp-setup"' in ag_page.text
+    assert "~/.gemini/config/mcp_config.json" in ag_page.text
+    assert ".agents/mcp_config.json" in ag_page.text
+    assert 'id="mcp-copy-json-btn"' in ag_page.text
+    assert 'id="mcp-download-btn"' in ag_page.text
+    assert 'download="mcp_config.json"' in ag_page.text
+    ag_snippet_match = re.search(r'id="mcp-config-json">([^<]+)<', ag_page.text)
+    assert ag_snippet_match is not None
+    ag_json = json.loads(html.unescape(ag_snippet_match.group(1)))
+    assert ag_json["mcpServers"]["gosmart-dictionary"] == {
+        "serverUrl": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": MCP_API_KEY_PLACEHOLDER},
+    }
+
+    # 2. POST /keys/create with agent=gemini & mcp_host=dict.gosmart.health auto-injects the newly created API key
+    keys_csrf = _extract_csrf(ag_page.text)
+    created_resp = client.post(
+        "/keys/create",
+        data={
+            "name": "MCP — Gemini CLI",
+            "agent": "gemini",
+            "mcp_host": "dict.gosmart.health",
+            "csrf_token": keys_csrf,
+        },
+    )
+    assert created_resp.status_code == 201
+    raw_key_match = re.search(r'id="generated-api-key">([^<]+)<', created_resp.text)
+    assert raw_key_match is not None
+    generated_key = raw_key_match.group(1).strip()
+    assert generated_key.startswith("gs_dict_")
+    assert "~/.gemini/settings.json" in created_resp.text
+    assert 'download="settings.json"' in created_resp.text
+
+    gem_snippet_match = re.search(r'id="mcp-config-json">([^<]+)<', created_resp.text)
+    assert gem_snippet_match is not None
+    gem_json = json.loads(html.unescape(gem_snippet_match.group(1)))
+    assert gem_json["mcpServers"]["gosmart-dictionary"] == {
+        "httpUrl": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": generated_key},
+    }
+
+    # 3. Subsequent GET /keys never leaks raw API key secrets (one-way SHA-256 hash storage preserved)
+    followup_get = client.get("/keys?agent=gemini&mcp_host=dict.gosmart.health")
+    assert followup_get.status_code == 200
+    assert generated_key not in followup_get.text
+
+    # 4. Progressive server-side Download JSON route returns attachment with canonical filename
+    dl_resp = client.get("/keys/mcp-config.json?agent=cursor&mcp_host=dict.gosmart.health")
+    assert dl_resp.status_code == 200
+    assert "application/json" in dl_resp.headers["content-type"]
+    assert dl_resp.headers["content-disposition"] == 'attachment; filename="mcp.json"'
+    assert dl_resp.headers["cache-control"] == "no-store"
+    dl_payload = dl_resp.json()
+    assert dl_payload["mcpServers"]["gosmart-dictionary"] == {
+        "url": "https://dict.gosmart.health/mcp",
+        "headers": {"X-API-Key": MCP_API_KEY_PLACEHOLDER},
+    }

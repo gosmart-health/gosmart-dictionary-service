@@ -21,10 +21,17 @@ class Neo4jAlreadyExistsLogFilter(logging.Filter):
         return True
 
 
-def setup_logging(settings: Optional[Settings] = None) -> None:
-    """Configure industrial-strength structured logging with structlog and 7-day file auto-rotation."""
+def setup_logging(settings: Optional[Settings] = None, *, stream: Optional[Any] = None) -> None:
+    """Configure industrial-strength structured logging with structlog and 7-day file auto-rotation.
+
+    Args:
+        settings: Optional ``Settings`` override (defaults to ``get_settings()``).
+        stream: Console ``StreamHandler`` target stream (defaults to ``sys.stdout``;
+            pass ``sys.stderr`` for ``gosmart-ds mcp --transport stdio`` so JSON-RPC frames on stdout stay clean).
+    """
     cfg = settings or get_settings()
     log_level = getattr(logging, cfg.LOG_LEVEL.upper(), logging.INFO)
+    console_stream = stream if stream is not None else sys.stdout
 
     # 1. Pre-chain for standard library log records arriving at the handler
     foreign_pre_chain = [
@@ -59,7 +66,7 @@ def setup_logging(settings: Optional[Settings] = None) -> None:
     )
 
     # 3. Create Console Handler
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(console_stream)
     console_handler.setLevel(log_level)
 
     if cfg.LOG_FORMAT.lower() == "console":
@@ -117,7 +124,7 @@ def setup_logging(settings: Optional[Settings] = None) -> None:
         root_logger.addHandler(handler)
 
     # Re-route uvicorn & framework loggers through the same handlers
-    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "neo4j", "genkit"):
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "neo4j", "genkit", "mcp"):
         sub_logger = logging.getLogger(logger_name)
         sub_logger.handlers.clear()
         sub_logger.propagate = True
