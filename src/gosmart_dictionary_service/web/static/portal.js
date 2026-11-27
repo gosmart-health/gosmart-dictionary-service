@@ -1,4 +1,4 @@
-/* Progressive-enhancement script for clipboard copy, Explorer loading states, and tabular AI Chat UX. */
+/* Progressive-enhancement script for theme toggle, clipboard copy, Explorer loading, MCP setup, and AI Chat UX. */
 (function () {
   "use strict";
 
@@ -1041,7 +1041,63 @@
     }
   }
 
+  // 5. Light / Dark theme toggle (follows OS prefers-color-scheme until explicitly toggled)
+  function initThemeToggle() {
+    var toggleBtn = document.getElementById("theme-toggle-btn");
+    if (!toggleBtn) return;
+
+    var STORAGE_KEY = "gosmart_ds_theme";
+    var mediaQuery = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+    function getSavedTheme() {
+      try {
+        var saved = window.localStorage.getItem(STORAGE_KEY);
+        return saved === "dark" || saved === "light" ? saved : null;
+      } catch (_err) {
+        return null;
+      }
+    }
+
+    function getEffectiveTheme() {
+      var explicit = document.documentElement.getAttribute("data-theme");
+      if (explicit === "dark" || explicit === "light") return explicit;
+      var saved = getSavedTheme();
+      if (saved) return saved;
+      return mediaQuery && mediaQuery.matches ? "dark" : "light";
+    }
+
+    function syncToggleUi() {
+      var isDark = getEffectiveTheme() === "dark";
+      toggleBtn.setAttribute("aria-pressed", isDark ? "true" : "false");
+      toggleBtn.textContent = isDark ? "\u2600 Light" : "\u263E Dark";
+      toggleBtn.title = isDark ? "Switch to light mode" : "Switch to dark mode";
+    }
+
+    toggleBtn.addEventListener("click", function () {
+      var nextTheme = getEffectiveTheme() === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", nextTheme);
+      try {
+        window.localStorage.setItem(STORAGE_KEY, nextTheme);
+      } catch (_err) {
+        // Ignore storage errors in private browsing modes
+      }
+      syncToggleUi();
+    });
+
+    if (mediaQuery && mediaQuery.addEventListener) {
+      mediaQuery.addEventListener("change", function () {
+        if (!getSavedTheme()) {
+          document.documentElement.removeAttribute("data-theme");
+          syncToggleUi();
+        }
+      });
+    }
+
+    syncToggleUi();
+  }
+
   initExploreSearch();
   initChatForm();
   initMcpSetup();
+  initThemeToggle();
 })();

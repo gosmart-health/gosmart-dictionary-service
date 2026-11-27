@@ -1,14 +1,27 @@
 /* GoSmart DS — Lightweight, Self-Contained Stylesheet for Multi-Page HTML Portal */
 :root {
+  color-scheme: light;
   --bg: #f6f8fb;
   --surface: #ffffff;
   --surface-muted: #f0f4f8;
+  --input-bg: #ffffff;
   --border: #d8e1eb;
   --text: #162231;
   --text-muted: #526377;
   --primary: #0f62fe;
   --primary-hover: #0043ce;
+  --link: #0f62fe;
   --accent: #0e7490;
+  --focus-ring: rgba(15, 98, 254, 0.25);
+  --spinner-track: rgba(15, 98, 254, 0.24);
+  --code-bg: #0f172a;
+  --code-text: #e2e8f0;
+  --code-border: #1e293b;
+  --info-bg: #e0f2fe;
+  --info-text: #075985;
+  --chip-bg: #eef4ff;
+  --chip-border: #c7d7fe;
+  --chip-hover-bg: #eef4ff;
   --success-bg: #e7f6ec;
   --success-border: #86efac;
   --success-text: #14532d;
@@ -22,6 +35,78 @@
   --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1220;
+  --surface: #111a2c;
+  --surface-muted: #182338;
+  --input-bg: #0d1526;
+  --border: #2a3954;
+  --text: #e5edf8;
+  --text-muted: #9fb0c7;
+  --primary: #2563eb;
+  --primary-hover: #3b82f6;
+  --link: #60a5fa;
+  --accent: #22d3ee;
+  --focus-ring: rgba(96, 165, 250, 0.35);
+  --spinner-track: rgba(96, 165, 250, 0.28);
+  --code-bg: #070d18;
+  --code-text: #e2e8f0;
+  --code-border: #22314a;
+  --info-bg: #0e2a42;
+  --info-text: #7dd3fc;
+  --chip-bg: #18294a;
+  --chip-border: #2f4f88;
+  --chip-hover-bg: #1c3157;
+  --success-bg: #0d2d1d;
+  --success-border: #1f6f47;
+  --success-text: #86efac;
+  --warn-bg: #33250a;
+  --warn-border: #8a6116;
+  --warn-text: #fde68a;
+  --danger-bg: #361318;
+  --danger-border: #8f2d36;
+  --danger-text: #fca5a5;
+  --shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0b1220;
+    --surface: #111a2c;
+    --surface-muted: #182338;
+    --input-bg: #0d1526;
+    --border: #2a3954;
+    --text: #e5edf8;
+    --text-muted: #9fb0c7;
+    --primary: #2563eb;
+    --primary-hover: #3b82f6;
+    --link: #60a5fa;
+    --accent: #22d3ee;
+    --focus-ring: rgba(96, 165, 250, 0.35);
+    --spinner-track: rgba(96, 165, 250, 0.28);
+    --code-bg: #070d18;
+    --code-text: #e2e8f0;
+    --code-border: #22314a;
+    --info-bg: #0e2a42;
+    --info-text: #7dd3fc;
+    --chip-bg: #18294a;
+    --chip-border: #2f4f88;
+    --chip-hover-bg: #1c3157;
+    --success-bg: #0d2d1d;
+    --success-border: #1f6f47;
+    --success-text: #86efac;
+    --warn-bg: #33250a;
+    --warn-border: #8a6116;
+    --warn-text: #fde68a;
+    --danger-bg: #361318;
+    --danger-border: #8f2d36;
+    --danger-text: #fca5a5;
+    --shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  }
 }
 
 * {
@@ -40,7 +125,7 @@ body {
 }
 
 a {
-  color: var(--primary);
+  color: var(--link);
   text-decoration: none;
 }
 
@@ -107,7 +192,7 @@ a:hover {
 
 .nav-links a:not(.btn).active,
 .nav-links a:not(.btn):hover {
-  color: var(--primary);
+  color: var(--link);
   text-decoration: none;
 }
 
@@ -117,6 +202,10 @@ a:hover {
   gap: 0.6rem;
   font-size: 0.88rem;
   color: var(--text-muted);
+}
+
+.theme-toggle {
+  white-space: nowrap;
 }
 
 .container {
@@ -189,7 +278,7 @@ a:hover {
   border-radius: 6px;
   font-size: 0.96rem;
   font-family: inherit;
-  background: #fff;
+  background: var(--input-bg);
   color: var(--text);
 }
 
@@ -198,8 +287,8 @@ a:hover {
 .form-group textarea:focus,
 .chat-select:focus,
 .explore-search-bar input:focus {
-  outline: 2px solid rgba(15, 98, 254, 0.25);
-  border-color: var(--primary);
+  outline: 2px solid var(--focus-ring);
+  border-color: var(--link);
 }
 
 .checkbox-row {
@@ -259,7 +348,7 @@ a:hover {
 }
 
 .btn-danger {
-  background: #fff;
+  background: var(--surface);
   color: var(--danger-text);
   border-color: var(--danger-border);
 }
@@ -317,8 +406,9 @@ a:hover {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--code-bg);
+  color: var(--code-text);
+  border: 1px solid var(--code-border);
   padding: 0.75rem 0.9rem;
   border-radius: 6px;
   margin: 0.75rem 0;
@@ -332,8 +422,9 @@ a:hover {
 }
 
 pre.code-block {
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--code-bg);
+  color: var(--code-text);
+  border: 1px solid var(--code-border);
   padding: 0.85rem 1rem;
   border-radius: 6px;
   overflow-x: auto;
@@ -387,8 +478,8 @@ th {
 }
 
 .pill-info {
-  background: #e0f2fe;
-  color: #075985;
+  background: var(--info-bg);
+  color: var(--info-text);
 }
 
 .pill-warn {
@@ -464,9 +555,9 @@ th {
 }
 
 .chat-prompt-chip:hover {
-  border-color: var(--primary);
-  background: #eef4ff;
-  color: var(--primary);
+  border-color: var(--link);
+  background: var(--chip-hover-bg);
+  color: var(--link);
 }
 
 .chat-msg {
@@ -559,7 +650,7 @@ th {
 
 .drilldown-link {
   font-weight: 600;
-  color: var(--primary);
+  color: var(--link);
   white-space: nowrap;
 }
 
@@ -581,12 +672,12 @@ th {
 .citation-rel-chip {
   display: inline-block;
   padding: 0.1rem 0.45rem;
-  background: #eef4ff;
-  border: 1px solid #c7d7fe;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
   border-radius: 4px;
   font-family: var(--font-mono), monospace;
   font-size: 0.74rem;
-  color: var(--primary);
+  color: var(--link);
 }
 
 .citation-actions {
@@ -632,7 +723,7 @@ th {
   border-radius: 6px;
   font-size: 0.86rem;
   font-family: inherit;
-  background: #fff;
+  background: var(--input-bg);
   color: var(--text);
 }
 
@@ -674,7 +765,7 @@ th {
   border-radius: 6px;
   font-size: 0.94rem;
   font-family: inherit;
-  background: #fff;
+  background: var(--input-bg);
   color: var(--text);
 }
 
@@ -721,8 +812,8 @@ th {
   display: inline-block;
   width: 1rem;
   height: 1rem;
-  border: 2px solid rgba(15, 98, 254, 0.24);
-  border-top-color: var(--primary);
+  border: 2px solid var(--spinner-track);
+  border-top-color: var(--link);
   border-radius: 50%;
   animation: gosmart-spin 0.75s linear infinite;
   flex-shrink: 0;
@@ -815,8 +906,8 @@ th {
 }
 
 .mcp-agent-tab:hover {
-  border-color: var(--primary);
-  background: #eef4ff;
+  border-color: var(--link);
+  background: var(--chip-hover-bg);
   text-decoration: none;
 }
 

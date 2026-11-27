@@ -741,3 +741,31 @@ def test_keys_page_mcp_configurator_paths_download_and_one_time_key_injection(
         "url": "https://dict.gosmart.health/mcp",
         "headers": {"X-API-Key": MCP_API_KEY_PLACEHOLDER},
     }
+
+
+def test_dark_mode_theme_markup_css_tokens_and_toggle_script(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_services(monkeypatch, dev_mode=True)
+
+    # Base HTML renders color-scheme meta, pre-paint theme boot script, and topbar toggle button
+    home_html = client.get("/", headers={"Accept": "text/html"})
+    assert home_html.status_code == 200
+    assert '<meta name="color-scheme" content="light dark">' in home_html.text
+    assert "gosmart_ds_theme" in home_html.text
+    assert 'id="theme-toggle-btn"' in home_html.text
+
+    # Stylesheet defines dark mode tokens for explicit [data-theme="dark"] and OS prefers-color-scheme
+    css = client.get("/static/style.css")
+    assert css.status_code == 200
+    assert ':root[data-theme="dark"]' in css.text
+    assert "@media (prefers-color-scheme: dark)" in css.text
+    assert "color-scheme: dark;" in css.text
+    assert "--input-bg:" in css.text
+
+    # Portal JS wires up the theme toggle handler
+    js = client.get("/static/portal.js")
+    assert js.status_code == 200
+    assert "initThemeToggle" in js.text
+    assert "gosmart_ds_theme" in js.text
