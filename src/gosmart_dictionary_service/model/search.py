@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from typing import Any, Dict, FrozenSet, List, Literal, Optional, Sequence
+from urllib.parse import urlencode
 
 from pydantic import BaseModel, Field
 
@@ -383,6 +384,70 @@ class SearchResponse(BaseModel):
         return payload
 
 
+def build_drilldown_url(
+    *,
+    node_id: Optional[str] = None,
+    entity_type: Optional[SearchEntityType | str] = None,
+    vocabulary: Optional[str] = None,
+    code: Optional[str] = None,
+) -> str:
+    """Build a canonical relative ``/explore?...`` drill-down URL for a dictionary entity."""
+    params: Dict[str, str] = {}
+    if node_id and str(node_id).strip():
+        params["id"] = str(node_id).strip()
+    if entity_type is not None:
+        et_val = entity_type.value if isinstance(entity_type, SearchEntityType) else str(entity_type).strip()
+        if et_val:
+            params["entity_type"] = et_val
+    if vocabulary and str(vocabulary).strip():
+        params["vocab"] = str(vocabulary).strip()
+    if code and str(code).strip():
+        params["code"] = str(code).strip()
+    if not params:
+        return "/explore"
+    return f"/explore?{urlencode(params)}"
+
+
+class GraphNodeView(BaseModel):
+    """Graph-UI-ready node descriptor representing a seed or 1-hop/2-hop neighbor entity."""
+
+    id: str = Field(..., description="Deterministic UUIDv5 id of the graph node")
+    entity_type: SearchEntityType = Field(..., description="Neo4j label of the node")
+    code: str = Field(..., description="Canonical code, DICOM tag_hex, slug, or UID")
+    display: str = Field(..., description="Human-readable display name")
+    vocabulary: Optional[str] = Field(default=None, description="Clinical vocabulary when applicable")
+    is_seed: bool = Field(default=False, description="True for the inspected center seed node")
+    drilldown_url: str = Field(..., description="Relative /explore URL to drill into this node")
+    macro: str = Field(default="", description="Precomputed gosmart-graphite Coding Macro")
+    properties: Dict[str, Any] = Field(default_factory=dict, description="Domain-specific node metadata")
+
+
+class GraphEdgeView(BaseModel):
+    """Graph-UI-ready directed edge descriptor linking two ``GraphNodeView`` entries."""
+
+    source_id: str = Field(..., description="Source node UUIDv5 id")
+    target_id: str = Field(..., description="Target node UUIDv5 id")
+    predicate: str = Field(..., description="Relationship predicate (e.g. IS_A, MAPS_TO, USES_ELEMENT)")
+    category: MatchSource = Field(..., description="Semantic relationship category")
+    direction: RelationDirection = Field(..., description="Direction relative to the seed node")
+    properties: Dict[str, Any] = Field(default_factory=dict, description="Edge metadata (e.g. requirement_type, path)")
+
+
+class EntityNeighborhood(BaseModel):
+    """Full entity inspection payload with tabular relationships and graph-ready nodes/edges."""
+
+    seed: SearchHit = Field(..., description="Inspected seed entity with attached related items")
+    drilldown_url: str = Field(..., description="Canonical /explore URL for the seed entity")
+    nodes: List[GraphNodeView] = Field(
+        default_factory=list,
+        description="Deduplicated graph nodes (seed + neighbors) ready for a Graph UI canvas",
+    )
+    edges: List[GraphEdgeView] = Field(
+        default_factory=list,
+        description="Directed graph edges connecting seed and neighbor nodes",
+    )
+
+
 def normalize_entity_types(
     entity_types: Optional[Sequence[SearchEntityType | str]],
 ) -> Optional[List[SearchEntityType]]:
@@ -417,8 +482,11 @@ __all__ = [
     "CLINICAL_ENTITY_TYPES",
     "DEFAULT_UNIFIED_ENTITY_TYPES",
     "DICOM_ENTITY_TYPES",
+    "EntityNeighborhood",
     "ExtractedCodeEntity",
     "FHIRCoding",
+    "GraphEdgeView",
+    "GraphNodeView",
     "MatchSource",
     "NLUIntent",
     "NLUParseResult",
@@ -430,5 +498,6 @@ __all__ = [
     "SearchOptions",
     "SearchResponse",
     "SubsumptionOutcome",
+    "build_drilldown_url",
     "normalize_entity_types",
 ]

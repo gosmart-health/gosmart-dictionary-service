@@ -17,7 +17,10 @@ from gosmart_dictionary_service.model.llm_config import DEFAULT_EMBEDDING_CONFIG
 from gosmart_dictionary_service.model.search import (
     DEFAULT_UNIFIED_ENTITY_TYPES,
     DICOM_ENTITY_TYPES,
+    EntityNeighborhood,
     FHIRCoding,
+    GraphEdgeView,
+    GraphNodeView,
     MatchSource,
     NLUIntent,
     NLUParseResult,
@@ -27,6 +30,7 @@ from gosmart_dictionary_service.model.search import (
     SearchHit,
     SearchResponse,
     SubsumptionOutcome,
+    build_drilldown_url,
     normalize_entity_types,
 )
 from gosmart_dictionary_service.service.embedding_service import EmbeddingService
@@ -147,6 +151,19 @@ CALL (e) {
            {requirement_type: u.requirement_type, path: u.path} AS extra_props
     LIMIT $limit
     UNION ALL
+    MATCH (mc:DicomMacro)-[u2:USES_ELEMENT]->(e)
+    WHERE (($test_id IS NULL AND mc.test_id IS NULL) OR ($test_id IS NOT NULL AND mc.test_id = $test_id))
+    RETURN mc.id AS id,
+           'DicomMacro' AS entity_type,
+           'reverse' AS direction,
+           'dicom_relation' AS relation_reason,
+           'USES_ELEMENT' AS relationship_id,
+           coalesce(mc.macro_id, mc.id) AS code,
+           mc.name AS display,
+           coalesce(mc.system_uri, 'http://gosmart.health/terminology/dicom-macro') AS system_uri,
+           {requirement_type: u2.requirement_type, path: u2.path} AS extra_props
+    LIMIT $limit
+    UNION ALL
     MATCH (e)-[:HAS_CONFIDENTIALITY_PROFILE]->(cp:DicomConfidentialityProfile)
     WHERE (($test_id IS NULL AND cp.test_id IS NULL) OR ($test_id IS NOT NULL AND cp.test_id = $test_id))
     RETURN cp.id AS id,
@@ -161,6 +178,199 @@ CALL (e) {
     LIMIT $limit
 }
 RETURN id, entity_type, direction, relation_reason, relationship_id, code, display, system_uri, extra_props
+LIMIT $limit
+"""
+
+_LOOKUP_CONCEPT_BY_ID_CYPHER: LiteralString = """
+MATCH (c:Concept {id: $node_id})
+WHERE (($test_id IS NULL AND c.test_id IS NULL) OR ($test_id IS NOT NULL AND c.test_id = $test_id))
+OPTIONAL MATCH (c)-[:BELONGS_TO_SYSTEM]->(cs:CodeSystem)
+RETURN c.id AS id,
+       c.vocabulary_id AS vocabulary_id,
+       c.code AS code,
+       c.display AS display,
+       coalesce(c.system_uri, cs.system_uri, '') AS system_uri,
+       cs.version AS system_version,
+       c.coding_macro AS coding_macro,
+       c.domain_id AS domain_id,
+       c.concept_class_id AS concept_class_id,
+       c.standard_concept AS standard_concept,
+       c.invalid_reason AS invalid_reason,
+       coalesce(c.is_deprecated, c.invalid_reason IS NOT NULL) AS is_deprecated,
+       c.athena_concept_id AS athena_concept_id,
+       coalesce(c.synonyms, []) AS synonyms,
+       c.definition AS definition
+LIMIT 1
+"""
+
+_LOOKUP_DICOM_BY_ID_CYPHER: LiteralString = """
+MATCH (n {id: $node_id})
+WHERE any(lbl IN labels(n) WHERE lbl IN [
+    'DicomElement', 'DicomCIOD', 'DicomModule', 'DicomMacro', 'DicomSOPClass', 'DicomConfidentialityProfile'
+])
+  AND (($test_id IS NULL AND n.test_id IS NULL) OR ($test_id IS NOT NULL AND n.test_id = $test_id))
+RETURN n.id AS id,
+       head([lbl IN labels(n) WHERE lbl IN [
+           'DicomElement', 'DicomCIOD', 'DicomModule', 'DicomMacro', 'DicomSOPClass', 'DicomConfidentialityProfile'
+       ]]) AS entity_type,
+       n.tag AS tag,
+       n.tag_hex AS tag_hex,
+       n.keyword AS keyword,
+       coalesce(n.sop_class_uid, n.ciod_id, n.module_id, n.macro_id, n.attribute_id, n.tag_hex, n.id) AS code,
+       n.name AS name,
+       n.vr AS vr,
+       n.vm AS vm,
+       coalesce(n.is_retired, false) AS is_retired,
+       n.description AS description,
+       n.ciod_name AS ciod_name,
+       n.modality AS modality,
+       n.basic_profile AS basic_profile,
+       n.link_to_standard AS link_to_standard,
+       coalesce(n.system_uri, '') AS system_uri,
+       n.coding_macro AS coding_macro
+LIMIT 1
+"""
+
+_LOOKUP_DICOM_STRUCTURE_BY_CODE_CYPHER: LiteralString = """
+MATCH (n)
+WHERE any(lbl IN labels(n) WHERE lbl IN $labels)
+  AND (($test_id IS NULL AND n.test_id IS NULL) OR ($test_id IS NOT NULL AND n.test_id = $test_id))
+  AND (
+      n.ciod_id = $code
+      OR n.module_id = $code
+      OR n.macro_id = $code
+      OR n.sop_class_uid = $code
+      OR n.attribute_id = $code
+      OR n.tag = $code
+  )
+RETURN n.id AS id,
+       head([lbl IN labels(n) WHERE lbl IN $labels]) AS entity_type,
+       n.tag AS tag,
+       n.tag_hex AS tag_hex,
+       n.keyword AS keyword,
+       coalesce(n.sop_class_uid, n.ciod_id, n.module_id, n.macro_id, n.attribute_id, n.tag_hex, n.id) AS code,
+       n.name AS name,
+       n.vr AS vr,
+       n.vm AS vm,
+       coalesce(n.is_retired, false) AS is_retired,
+       n.description AS description,
+       n.ciod_name AS ciod_name,
+       n.modality AS modality,
+       n.basic_profile AS basic_profile,
+       n.link_to_standard AS link_to_standard,
+       coalesce(n.system_uri, '') AS system_uri,
+       n.coding_macro AS coding_macro
+LIMIT 1
+"""
+
+_DICOM_STRUCTURE_RELATED_CYPHER: LiteralString = """
+MATCH (n {id: $node_id})
+CALL (n) {
+    MATCH (s:DicomSOPClass)-[:IMPLEMENTS_CIOD]->(n:DicomCIOD)
+    WHERE (($test_id IS NULL AND s.test_id IS NULL) OR ($test_id IS NOT NULL AND s.test_id = $test_id))
+    RETURN s.id AS id,
+           'DicomSOPClass' AS entity_type,
+           'reverse' AS direction,
+           'IMPLEMENTS_CIOD' AS relationship_id,
+           s.sop_class_uid AS code,
+           s.name AS display,
+           coalesce(s.system_uri, 'http://gosmart.health/terminology/dicom-sop-class') AS system_uri,
+           {modality: s.modality} AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (n:DicomSOPClass)-[:IMPLEMENTS_CIOD]->(c:DicomCIOD)
+    WHERE (($test_id IS NULL AND c.test_id IS NULL) OR ($test_id IS NOT NULL AND c.test_id = $test_id))
+    RETURN c.id AS id,
+           'DicomCIOD' AS entity_type,
+           'forward' AS direction,
+           'IMPLEMENTS_CIOD' AS relationship_id,
+           c.ciod_id AS code,
+           c.name AS display,
+           coalesce(c.system_uri, 'http://gosmart.health/terminology/dicom-ciod') AS system_uri,
+           {} AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (n:DicomCIOD)-[hm:HAS_MODULE]->(m:DicomModule)
+    WHERE (($test_id IS NULL AND m.test_id IS NULL) OR ($test_id IS NOT NULL AND m.test_id = $test_id))
+    RETURN m.id AS id,
+           'DicomModule' AS entity_type,
+           'forward' AS direction,
+           'HAS_MODULE' AS relationship_id,
+           m.module_id AS code,
+           m.name AS display,
+           coalesce(m.system_uri, 'http://gosmart.health/terminology/dicom-module') AS system_uri,
+           {usage: hm.usage, information_entity: hm.information_entity} AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (c2:DicomCIOD)-[hm2:HAS_MODULE]->(n:DicomModule)
+    WHERE (($test_id IS NULL AND c2.test_id IS NULL) OR ($test_id IS NOT NULL AND c2.test_id = $test_id))
+    RETURN c2.id AS id,
+           'DicomCIOD' AS entity_type,
+           'reverse' AS direction,
+           'HAS_MODULE' AS relationship_id,
+           c2.ciod_id AS code,
+           c2.name AS display,
+           coalesce(c2.system_uri, 'http://gosmart.health/terminology/dicom-ciod') AS system_uri,
+           {usage: hm2.usage, information_entity: hm2.information_entity} AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (n:DicomCIOD)-[fg:HAS_FUNC_GROUP_MACRO]->(mc:DicomMacro)
+    WHERE (($test_id IS NULL AND mc.test_id IS NULL) OR ($test_id IS NOT NULL AND mc.test_id = $test_id))
+    RETURN mc.id AS id,
+           'DicomMacro' AS entity_type,
+           'forward' AS direction,
+           'HAS_FUNC_GROUP_MACRO' AS relationship_id,
+           mc.macro_id AS code,
+           mc.name AS display,
+           coalesce(mc.system_uri, 'http://gosmart.health/terminology/dicom-macro') AS system_uri,
+           {usage: fg.usage, module_type: fg.module_type} AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (c3:DicomCIOD)-[fg2:HAS_FUNC_GROUP_MACRO]->(n:DicomMacro)
+    WHERE (($test_id IS NULL AND c3.test_id IS NULL) OR ($test_id IS NOT NULL AND c3.test_id = $test_id))
+    RETURN c3.id AS id,
+           'DicomCIOD' AS entity_type,
+           'reverse' AS direction,
+           'HAS_FUNC_GROUP_MACRO' AS relationship_id,
+           c3.ciod_id AS code,
+           c3.name AS display,
+           coalesce(c3.system_uri, 'http://gosmart.health/terminology/dicom-ciod') AS system_uri,
+           {usage: fg2.usage, module_type: fg2.module_type} AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (n)-[ue:USES_ELEMENT]->(el:DicomElement)
+    WHERE (n:DicomModule OR n:DicomMacro)
+      AND (($test_id IS NULL AND el.test_id IS NULL) OR ($test_id IS NOT NULL AND el.test_id = $test_id))
+    RETURN el.id AS id,
+           'DicomElement' AS entity_type,
+           'forward' AS direction,
+           'USES_ELEMENT' AS relationship_id,
+           coalesce(el.tag_hex, el.id) AS code,
+           el.name AS display,
+           coalesce(el.system_uri, 'http://gosmart.health/terminology/dicom-tag') AS system_uri,
+           {
+               tag: el.tag,
+               keyword: el.keyword,
+               vr: el.vr,
+               vm: el.vm,
+               requirement_type: ue.requirement_type,
+               path: ue.path
+           } AS extra_props
+    LIMIT $limit
+    UNION ALL
+    MATCH (el2:DicomElement)-[:HAS_CONFIDENTIALITY_PROFILE]->(n:DicomConfidentialityProfile)
+    WHERE (($test_id IS NULL AND el2.test_id IS NULL) OR ($test_id IS NOT NULL AND el2.test_id = $test_id))
+    RETURN el2.id AS id,
+           'DicomElement' AS entity_type,
+           'reverse' AS direction,
+           'HAS_CONFIDENTIALITY_PROFILE' AS relationship_id,
+           coalesce(el2.tag_hex, el2.id) AS code,
+           el2.name AS display,
+           coalesce(el2.system_uri, 'http://gosmart.health/terminology/dicom-tag') AS system_uri,
+           {tag: el2.tag, keyword: el2.keyword, vr: el2.vr} AS extra_props
+    LIMIT $limit
+}
+RETURN id, entity_type, direction, relationship_id, code, display, system_uri, extra_props
 LIMIT $limit
 """
 
@@ -597,8 +807,14 @@ def _build_dicom_hit(
             props["description"] = row["description"]
         if row.get("ciod_name"):
             props["ciod_name"] = row["ciod_name"]
+        if row.get("modality"):
+            props["modality"] = row["modality"]
         if row.get("basic_profile"):
             props["basic_profile"] = row["basic_profile"]
+        if row.get("tag"):
+            props["tag"] = row["tag"]
+        if row.get("link_to_standard"):
+            props["link_to_standard"] = row["link_to_standard"]
 
     return SearchHit(
         id=str(row["id"]),
@@ -1244,6 +1460,262 @@ class SearchService:
                 descendant_code,
                 **kwargs,
             )
+        )
+
+    async def inspect_entity(
+        self,
+        *,
+        node_id: Optional[str] = None,
+        entity_type: Optional[SearchEntityType | str] = None,
+        vocabulary_id: Optional[str] = None,
+        code: Optional[str] = None,
+        related_limit: int = 40,
+        test_id: Optional[str] = None,
+    ) -> Optional[EntityNeighborhood]:
+        """Resolve a Clinical Concept or DICOM entity with its 1-hop/2-hop neighborhood and Graph-UI descriptors."""
+        norm_test_id = normalize_test_id(test_id)
+        parsed_et: Optional[SearchEntityType] = None
+        if entity_type is not None:
+            if isinstance(entity_type, SearchEntityType):
+                parsed_et = entity_type
+            elif str(entity_type).strip():
+                try:
+                    parsed_et = SearchEntityType(str(entity_type).strip())
+                except ValueError:
+                    parsed_et = None
+
+        seed: Optional[SearchHit] = None
+
+        # 1) Direct deterministic UUIDv5 lookup when node_id is supplied
+        if node_id and str(node_id).strip():
+            clean_id = str(node_id).strip()
+            if parsed_et in (None, SearchEntityType.CONCEPT):
+                c_rows = await self.client.execute_query(
+                    _LOOKUP_CONCEPT_BY_ID_CYPHER,
+                    {"node_id": clean_id, "test_id": norm_test_id},
+                )
+                if c_rows:
+                    c_row = c_rows[0]
+                    rels = await self.find_related_concepts(
+                        str(c_row["vocabulary_id"]),
+                        str(c_row["code"]),
+                        direction=RelationDirection.BOTH,
+                        include_shared_attributes=True,
+                        limit=related_limit,
+                        test_id=norm_test_id,
+                    )
+                    seed = _build_concept_hit(
+                        c_row,
+                        score=1.0,
+                        match_sources=[MatchSource.EXACT_CODE],
+                        related=rels,
+                    )
+
+            if seed is None and (parsed_et is None or parsed_et in DICOM_ENTITY_TYPES):
+                d_rows = await self.client.execute_query(
+                    _LOOKUP_DICOM_BY_ID_CYPHER,
+                    {"node_id": clean_id, "test_id": norm_test_id},
+                )
+                if d_rows:
+                    seed = await self._hydrate_dicom_inspection_row(
+                        d_rows[0],
+                        related_limit=related_limit,
+                        test_id=norm_test_id,
+                    )
+
+        # 2) Fallback lookup by (entity_type, vocabulary_id, code)
+        if seed is None and code and str(code).strip():
+            clean_code = str(code).strip()
+            if vocabulary_id and str(vocabulary_id).strip() and parsed_et in (None, SearchEntityType.CONCEPT):
+                seed = await self.lookup_code(
+                    str(vocabulary_id).strip(),
+                    clean_code,
+                    include_related=True,
+                    related_direction=RelationDirection.BOTH,
+                    include_shared_attributes=True,
+                    related_limit=related_limit,
+                    test_id=norm_test_id,
+                )
+
+            if seed is None and parsed_et in (None, SearchEntityType.DICOM_ELEMENT, SearchEntityType.DICOM_SOP_CLASS):
+                elem_or_sop = await self.lookup_dicom(
+                    clean_code,
+                    include_related=True,
+                    related_limit=related_limit,
+                    test_id=norm_test_id,
+                )
+                if elem_or_sop is not None:
+                    if elem_or_sop.entity_type == SearchEntityType.DICOM_SOP_CLASS and not elem_or_sop.related:
+                        elem_or_sop.related = await self._fetch_dicom_structure_relations(
+                            elem_or_sop.id,
+                            limit=related_limit,
+                            test_id=norm_test_id,
+                        )
+                    seed = elem_or_sop
+
+            if seed is None and (parsed_et is None or parsed_et in DICOM_ENTITY_TYPES):
+                target_labels = (
+                    [parsed_et.value]
+                    if parsed_et in DICOM_ENTITY_TYPES
+                    else [et.value for et in sorted(DICOM_ENTITY_TYPES, key=lambda x: x.value)]
+                )
+                s_rows = await self.client.execute_query(
+                    _LOOKUP_DICOM_STRUCTURE_BY_CODE_CYPHER,
+                    {"labels": target_labels, "code": clean_code, "test_id": norm_test_id},
+                )
+                if s_rows:
+                    seed = await self._hydrate_dicom_inspection_row(
+                        s_rows[0],
+                        related_limit=related_limit,
+                        test_id=norm_test_id,
+                    )
+
+        if seed is None:
+            return None
+
+        return self._build_entity_neighborhood(seed)
+
+    def inspect_entity_sync(self, **kwargs: Any) -> Optional[EntityNeighborhood]:
+        """Synchronous convenience wrapper around ``inspect_entity``."""
+        return _run_coro_sync(self.inspect_entity(**kwargs))
+
+    async def _hydrate_dicom_inspection_row(
+        self,
+        row: Dict[str, Any],
+        *,
+        related_limit: int,
+        test_id: Optional[str],
+    ) -> SearchHit:
+        et = SearchEntityType(str(row.get("entity_type") or SearchEntityType.DICOM_ELEMENT.value))
+        node_id = str(row["id"])
+        if et == SearchEntityType.DICOM_ELEMENT:
+            rel_rows = await self.client.execute_query(
+                _DICOM_ELEMENT_RELATED_CYPHER,
+                {"node_id": node_id, "limit": related_limit, "test_id": test_id},
+            )
+            related = [self._dicom_rel_row_to_hit(rr) for rr in rel_rows]
+        else:
+            related = await self._fetch_dicom_structure_relations(
+                node_id,
+                limit=related_limit,
+                test_id=test_id,
+            )
+        return _build_dicom_hit(
+            row,
+            score=1.0,
+            match_sources=[MatchSource.EXACT_CODE],
+            related=related,
+        )
+
+    async def _fetch_dicom_structure_relations(
+        self,
+        node_id: str,
+        *,
+        limit: int,
+        test_id: Optional[str],
+    ) -> List[RelatedConceptHit]:
+        rel_rows = await self.client.execute_query(
+            _DICOM_STRUCTURE_RELATED_CYPHER,
+            {"node_id": node_id, "limit": limit, "test_id": test_id},
+        )
+        return [self._dicom_rel_row_to_hit(rr) for rr in rel_rows]
+
+    @staticmethod
+    def _dicom_rel_row_to_hit(rr: Dict[str, Any]) -> RelatedConceptHit:
+        sys_uri = str(rr.get("system_uri") or "")
+        c_code = str(rr.get("code") or "")
+        disp = str(rr.get("display") or "")
+        clean_props = {k: v for k, v in dict(rr.get("extra_props") or {}).items() if v is not None}
+        return RelatedConceptHit(
+            id=str(rr["id"]),
+            entity_type=SearchEntityType(str(rr["entity_type"])),
+            direction=RelationDirection(str(rr["direction"])),
+            relation_reason=MatchSource.DICOM_RELATION,
+            relationship_id=str(rr.get("relationship_id") or ""),
+            score=_RELATION_BASE_SCORE[MatchSource.DICOM_RELATION],
+            coding=FHIRCoding(system=sys_uri, code=c_code, display=disp),
+            macro=f"{sys_uri}|{c_code}|{disp}",
+            properties=clean_props,
+        )
+
+    @staticmethod
+    def _build_entity_neighborhood(seed: SearchHit) -> EntityNeighborhood:
+        seed_vocab = str(seed.properties["vocabulary"]) if seed.properties.get("vocabulary") else None
+        seed_url = build_drilldown_url(
+            node_id=seed.id,
+            entity_type=seed.entity_type,
+            vocabulary=seed_vocab,
+            code=seed.coding.code,
+        )
+        nodes_by_id: Dict[str, GraphNodeView] = {
+            seed.id: GraphNodeView(
+                id=seed.id,
+                entity_type=seed.entity_type,
+                code=seed.coding.code,
+                display=seed.coding.display,
+                vocabulary=seed_vocab,
+                is_seed=True,
+                drilldown_url=seed_url,
+                macro=seed.macro,
+                properties=dict(seed.properties),
+            )
+        }
+        edges: List[GraphEdgeView] = []
+
+        for rel in seed.related:
+            rel_vocab = str(rel.properties["vocabulary"]) if rel.properties.get("vocabulary") else None
+            rel_url = build_drilldown_url(
+                node_id=rel.id,
+                entity_type=rel.entity_type,
+                vocabulary=rel_vocab,
+                code=rel.coding.code,
+            )
+            if rel.id not in nodes_by_id:
+                nodes_by_id[rel.id] = GraphNodeView(
+                    id=rel.id,
+                    entity_type=rel.entity_type,
+                    code=rel.coding.code,
+                    display=rel.coding.display,
+                    vocabulary=rel_vocab,
+                    is_seed=False,
+                    drilldown_url=rel_url,
+                    macro=rel.macro,
+                    properties=dict(rel.properties),
+                )
+            if rel.direction == RelationDirection.REVERSE:
+                src_id, dst_id = rel.id, seed.id
+            else:
+                src_id, dst_id = seed.id, rel.id
+            edge_props: Dict[str, Any] = {}
+            for key in (
+                "requirement_type",
+                "path",
+                "usage",
+                "information_entity",
+                "module_type",
+                "equivalence",
+                "hops",
+            ):
+                if rel.properties.get(key) is not None:
+                    edge_props[key] = rel.properties[key]
+            if rel.shared_axes:
+                edge_props["shared_axes"] = list(rel.shared_axes)
+            edges.append(
+                GraphEdgeView(
+                    source_id=src_id,
+                    target_id=dst_id,
+                    predicate=rel.relationship_id or rel.relation_reason.value,
+                    category=rel.relation_reason,
+                    direction=rel.direction,
+                    properties=edge_props,
+                )
+            )
+
+        return EntityNeighborhood(
+            seed=seed,
+            drilldown_url=seed_url,
+            nodes=list(nodes_by_id.values()),
+            edges=edges,
         )
 
     # -------------------------------------------------------------------------

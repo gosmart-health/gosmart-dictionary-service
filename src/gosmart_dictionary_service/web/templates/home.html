@@ -5,13 +5,14 @@
 <section class="card hero">
   <h1>GoSmart Health Dictionary Service</h1>
   <p class="lead">
-    Clinical terminology and DICOM standard knowledge graph with grounded AI lookup,
-    self-service API keys, and REST/MCP integration.
+    Unified clinical terminology (SNOMED CT, LOINC, ICD-10-CM, UCUM) and DICOM standard knowledge graph
+    with NLU-grounded AI lookup, ontology drill-down, self-service API keys, and REST/MCP integration.
   </p>
   <div class="btn-row">
     {% if current_user %}
-      <a href="/keys" class="btn btn-primary">Manage API Keys</a>
-      <a href="/chat" class="btn btn-secondary">Open AI Chat</a>
+      <a href="/chat" class="btn btn-primary">Open AI Chat</a>
+      <a href="/explore" class="btn btn-secondary">Ontology Explorer</a>
+      <a href="/keys" class="btn btn-secondary">Manage API Keys</a>
       <a href="/docs" class="btn btn-secondary">Explore REST API</a>
     {% else %}
       <a href="/register" class="btn btn-primary">Create Account</a>
@@ -41,10 +42,10 @@
   </div>
 
   <div class="card">
-    <h2>3. Grounded AI Chat</h2>
+    <h2>3. Grounded AI Chat &amp; Drill-Down</h2>
     <p class="muted">
-      Query the DICOM standard knowledge graph in natural language with Genkit inference
-      grounded directly in Neo4j dictionary entries.
+      Query Clinical Terminologies and the DICOM standard in natural language with NLU-guided hybrid search,
+      tabular FHIR citations, and interactive ontology drill-down.
     </p>
     <a href="/chat">Open AI Chat &rarr;</a>
   </div>

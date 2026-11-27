@@ -1,7 +1,8 @@
-"""Multi-page server-rendered HTML routes for registration, login, API keys, and AI Chat."""
+"""Multi-page server-rendered HTML routes for registration, login, API keys, AI Chat, and Entity Explorer."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,16 +20,26 @@ from gosmart_dictionary_service.core.security import (
     verify_csrf_token,
 )
 from gosmart_dictionary_service.model.auth import _validate_email_format
+from gosmart_dictionary_service.model.search import (
+    EntityNeighborhood,
+    MatchSource,
+    RelatedConceptHit,
+    SearchEntityType,
+    build_drilldown_url,
+)
 from gosmart_dictionary_service.service.chat_service import (
     ChatProviderError,
     ChatRequest,
+    ChatSearchScope,
     chat_service,
+    search_hit_to_citation,
 )
 from gosmart_dictionary_service.service.email_service import (
     EmailConfigurationError,
     EmailDeliveryError,
     email_service,
 )
+from gosmart_dictionary_service.service.search_service import search_service
 from gosmart_dictionary_service.service.user_service import (
     EmailAlreadyRegisteredError,
     EmailNotVerifiedError,
@@ -44,6 +55,11 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 web_router = APIRouter(include_in_schema=False)
 
 CSRF_COOKIE_NAME = "gosmart_ds_csrf"
+_VALID_CHAT_SCOPES: Dict[str, ChatSearchScope] = {
+    "auto": "auto",
+    "clinical": "clinical",
+    "dicom": "dicom",
+}
 
 
 def _wants_html(request: Request) -> bool:
@@ -113,7 +129,7 @@ def _render(
 
 def _redirect_to_login(next_path: str) -> RedirectResponse:
     return RedirectResponse(
-        url=f"/login?next={quote(next_path, safe='/')}",
+        url=f"/login?next={quote(next_path, safe='/?=&:')}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
@@ -123,6 +139,133 @@ def _validate_csrf_or_error(request: Request, csrf_token: str) -> Optional[str]:
     if not verify_csrf_token(cookie_val, csrf_token):
         return "Security token validation failed. Please reload the page and try again."
     return None
+
+
+def _normalize_scope(raw_scope: Optional[str]) -> ChatSearchScope:
+    key = (raw_scope or "auto").strip().lower()
+    return _VALID_CHAT_SCOPES.get(key, "auto")
+
+
+def _format_related_row(rel: RelatedConceptHit) -> Dict[str, Any]:
+    props = rel.properties or {}
+    vocab = str(props["vocabulary"]) if props.get("vocabulary") else None
+    if rel.entity_type == SearchEntityType.CONCEPT and vocab:
+        identifier = f"{vocab}:{rel.coding.code}"
+        schema_badge = vocab
+    elif rel.entity_type == SearchEntityType.DICOM_ELEMENT:
+        identifier = str(props.get("tag") or rel.coding.code)
+        schema_badge = "DICOM Tag"
+    else:
+        identifier = rel.coding.code
+        schema_badge = rel.entity_type.value.removeprefix("Dicom") or rel.entity_type.value
+
+    detail_bits: List[str] = []
+    if props.get("domain"):
+        detail_bits.append(f"Domain: {props['domain']}")
+    if props.get("standard") == "S":
+        detail_bits.append("Standard")
+    if props.get("equivalence"):
+        detail_bits.append(f"Equiv: {props['equivalence']}")
+    if props.get("hops") and int(props["hops"]) > 1:
+        detail_bits.append(f"{props['hops']}-hop")
+    if rel.shared_axes:
+        detail_bits.append("Shared axes: " + ", ".join(rel.shared_axes[:3]))
+    if props.get("keyword"):
+        detail_bits.append(str(props["keyword"]))
+    if props.get("vr"):
+        detail_bits.append(f"VR={props['vr']}")
+    if props.get("requirement_type"):
+        detail_bits.append(f"Req={props['requirement_type']}")
+    if props.get("usage"):
+        detail_bits.append(f"Usage={props['usage']}")
+    if props.get("information_entity"):
+        detail_bits.append(f"IE={props['information_entity']}")
+    if props.get("basic_profile"):
+        detail_bits.append(f"BasicProfile={props['basic_profile']}")
+    if props.get("path"):
+        detail_bits.append(f"Path={props['path']}")
+
+    drilldown_url = build_drilldown_url(
+        node_id=rel.id,
+        entity_type=rel.entity_type,
+        vocabulary=vocab,
+        code=rel.coding.code,
+    )
+    chat_prompt = f"Explain {identifier} ({rel.coding.display}) and show related concepts"
+    return {
+        "id": rel.id,
+        "entity_type": rel.entity_type.value,
+        "schema_badge": schema_badge,
+        "identifier": identifier,
+        "display": rel.coding.display or identifier,
+        "predicate": rel.relationship_id or rel.relation_reason.value,
+        "direction": rel.direction.value,
+        "reason": rel.relation_reason.value,
+        "details": " · ".join(detail_bits),
+        "macro": rel.macro,
+        "deprecated": bool(props.get("deprecated", False)),
+        "drilldown_url": drilldown_url,
+        "ask_chat_url": f"/chat?q={quote(chat_prompt)}",
+    }
+
+
+def _group_neighborhood_tables(neighborhood: EntityNeighborhood) -> List[Dict[str, Any]]:
+    """Organize ``neighborhood.seed.related`` into scannable relationship tables for ``explore.html``."""
+    hierarchy: List[Dict[str, Any]] = []
+    crosswalks: List[Dict[str, Any]] = []
+    attributes: List[Dict[str, Any]] = []
+    dicom_links: List[Dict[str, Any]] = []
+
+    for rel in neighborhood.seed.related:
+        formatted = _format_related_row(rel)
+        if rel.relation_reason in {MatchSource.IS_A_PARENT, MatchSource.IS_A_CHILD}:
+            hierarchy.append(formatted)
+        elif rel.relation_reason in {
+            MatchSource.MAPS_TO,
+            MatchSource.MAPPED_FROM,
+            MatchSource.REPLACED_BY,
+            MatchSource.REPLACES,
+        }:
+            crosswalks.append(formatted)
+        elif rel.relation_reason == MatchSource.DICOM_RELATION:
+            dicom_links.append(formatted)
+        else:
+            attributes.append(formatted)
+
+    groups: List[Dict[str, Any]] = []
+    if hierarchy:
+        groups.append(
+            {
+                "title": "Ontology Hierarchy (IS_A Parents & Subtypes)",
+                "subtitle": "Direct supertype and subtype concepts in the terminology graph.",
+                "rows": hierarchy,
+            }
+        )
+    if crosswalks:
+        groups.append(
+            {
+                "title": "Crosswalks & Lifecycle Mappings (MAPS_TO / REPLACED_BY)",
+                "subtitle": "Cross-vocabulary translations and active replacement concepts.",
+                "rows": crosswalks,
+            }
+        )
+    if attributes:
+        groups.append(
+            {
+                "title": "Defining Attributes & Shared-Axis Siblings",
+                "subtitle": "1-hop defining attributes and 2-hop sibling concepts sharing clinical axes.",
+                "rows": attributes,
+            }
+        )
+    if dicom_links:
+        groups.append(
+            {
+                "title": "DICOM Standard Structure & Confidentiality Links",
+                "subtitle": "Connected CIODs, SOP Classes, Modules, Macros, Data Elements, and PS3.15 rules.",
+                "rows": dicom_links,
+            }
+        )
+    return groups
 
 
 @web_router.get("/", response_model=None)
@@ -573,11 +716,16 @@ async def keys_revoke_submit(
 @web_router.get("/chat", response_class=HTMLResponse)
 async def chat_page(
     request: Request,
+    q: Optional[str] = Query(default=None),
+    scope: Optional[str] = Query(default="auto"),
     current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
 ) -> Response:
     """Render the Grounded Dictionary AI Chat page."""
     if not current_user:
-        return _redirect_to_login("/chat")
+        next_target = "/chat"
+        if request.url.query:
+            next_target = f"/chat?{request.url.query}"
+        return _redirect_to_login(next_target)
 
     cfg = await chat_service.resolve_inference_config()
     return _render(
@@ -587,6 +735,10 @@ async def chat_page(
             "active_page": "chat",
             "inference_provider": cfg.provider,
             "inference_model": cfg.model,
+            "prefill_message": (q or "").strip(),
+            "selected_scope": _normalize_scope(scope),
+            "include_context_checked": True,
+            "include_related_checked": False,
             "messages": [],
             "error": None,
         },
@@ -598,7 +750,9 @@ async def chat_page(
 async def chat_submit(
     request: Request,
     message: str = Form(default=""),
-    include_context: Optional[str] = Form(default="on"),
+    scope: str = Form(default="auto"),
+    include_context: Optional[str] = Form(default=None),
+    include_related: Optional[str] = Form(default=None),
     csrf_token: str = Form(default=""),
     current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
 ) -> Response:
@@ -607,6 +761,10 @@ async def chat_submit(
         return _redirect_to_login("/chat")
 
     cfg = await chat_service.resolve_inference_config()
+    resolved_scope = _normalize_scope(scope)
+    use_ctx = bool(include_context and include_context.lower() in {"on", "true", "1", "yes"})
+    use_related = bool(include_related and include_related.lower() in {"on", "true", "1", "yes"})
+
     messages: List[Dict[str, Any]] = []
     error: Optional[str] = None
     status_code = status.HTTP_200_OK
@@ -619,17 +777,24 @@ async def chat_submit(
         error = "Please enter a question."
         status_code = status.HTTP_400_BAD_REQUEST
     else:
-        use_ctx = bool(include_context and include_context.lower() in {"on", "true", "1", "yes"})
         messages.append({"role": "user", "content": message.strip(), "citations": []})
         try:
             chat_resp = await chat_service.chat(
-                ChatRequest(message=message.strip(), include_context=use_ctx),
+                ChatRequest(
+                    message=message.strip(),
+                    include_context=use_ctx,
+                    scope=resolved_scope,
+                    include_related=use_related,
+                ),
             )
             messages.append(
                 {
                     "role": "assistant",
                     "content": chat_resp.reply,
                     "citations": [c.model_dump() for c in chat_resp.citations],
+                    "nlu": chat_resp.nlu.model_dump() if chat_resp.nlu else None,
+                    "warnings": list(chat_resp.warnings),
+                    "search_duration_ms": chat_resp.search_duration_ms,
                     "meta": f"{chat_resp.provider}/{chat_resp.model}",
                 }
             )
@@ -644,7 +809,125 @@ async def chat_submit(
             "active_page": "chat",
             "inference_provider": cfg.provider,
             "inference_model": cfg.model,
+            "prefill_message": "",
+            "selected_scope": resolved_scope,
+            "include_context_checked": use_ctx,
+            "include_related_checked": use_related,
             "messages": messages,
+            "error": error,
+        },
+        current_user=current_user,
+        status_code=status_code,
+    )
+
+
+@web_router.get("/explore", response_class=HTMLResponse)
+async def explore_page(
+    request: Request,
+    id: Optional[str] = Query(default=None),
+    entity_type: Optional[str] = Query(default=None),
+    vocab: Optional[str] = Query(default=None),
+    code: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    scope: Optional[str] = Query(default="auto"),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+) -> Response:
+    """Render the Entity Drill-Down & Ontology Explorer page (Graph-UI ready)."""
+    if not current_user:
+        next_target = "/explore"
+        if request.url.query:
+            next_target = f"/explore?{request.url.query}"
+        return _redirect_to_login(next_target)
+
+    resolved_scope = _normalize_scope(scope)
+    has_lookup = bool((id and id.strip()) or (code and code.strip()))
+    has_search = bool(q and q.strip())
+
+    neighborhood: Optional[EntityNeighborhood] = None
+    seed_citation: Optional[Dict[str, Any]] = None
+    relation_groups: List[Dict[str, Any]] = []
+    fhir_coding_json: Optional[str] = None
+    graph_payload_json: Optional[str] = None
+    ask_chat_url: Optional[str] = None
+    search_hits: List[Dict[str, Any]] = []
+    search_nlu: Optional[Dict[str, Any]] = None
+    warnings: List[str] = []
+    error: Optional[str] = None
+    status_code = status.HTTP_200_OK
+
+    if has_lookup:
+        try:
+            neighborhood = await search_service.inspect_entity(
+                node_id=id,
+                entity_type=entity_type,
+                vocabulary_id=vocab,
+                code=code,
+                related_limit=50,
+            )
+        except Exception as exc:
+            error = f"Unable to inspect entity from Neo4j: {exc}"
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+        if neighborhood is None and error is None:
+            target_desc = code or id or "requested entity"
+            error = f"Dictionary entity '{target_desc}' was not found in the active Neo4j database."
+            status_code = status.HTTP_404_NOT_FOUND
+        elif neighborhood is not None:
+            cit = search_hit_to_citation(neighborhood.seed, related_limit=50)
+            seed_citation = cit.model_dump()
+            relation_groups = _group_neighborhood_tables(neighborhood)
+            fhir_coding_json = json.dumps(neighborhood.seed.coding.model_dump(exclude_none=True), indent=2)
+            graph_payload_json = json.dumps(
+                {
+                    "seed_id": neighborhood.seed.id,
+                    "nodes": [n.model_dump() for n in neighborhood.nodes],
+                    "edges": [e.model_dump() for e in neighborhood.edges],
+                }
+            )
+            ask_prompt = f"Explain {cit.identifier} ({cit.name}) and its related ontology concepts"
+            ask_chat_url = f"/chat?q={quote(ask_prompt)}"
+
+    elif has_search:
+        entity_filter = (
+            ["clinical"] if resolved_scope == "clinical" else (["dicom"] if resolved_scope == "dicom" else None)
+        )
+        try:
+            resp = await search_service.search(
+                q.strip(),  # type: ignore[union-attr]
+                entity_types=entity_filter,
+                include_related=False,
+                limit=20,
+            )
+            search_hits = [search_hit_to_citation(h).model_dump() for h in resp.hits]
+            search_nlu = {
+                "intent": resp.nlu.intent.value,
+                "rewritten_query": resp.nlu.rewritten_query,
+                "duration_ms": resp.duration_ms,
+            }
+            warnings = list(resp.warnings)
+        except Exception as exc:
+            error = f"Dictionary search failed: {exc}"
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return _render(
+        request,
+        "explore.html",
+        {
+            "active_page": "explore",
+            "query_text": (q or "").strip(),
+            "selected_scope": resolved_scope,
+            "neighborhood": neighborhood,
+            "seed": neighborhood.seed if neighborhood else None,
+            "seed_citation": seed_citation,
+            "relation_groups": relation_groups,
+            "fhir_coding_json": fhir_coding_json,
+            "graph_payload_json": graph_payload_json,
+            "graph_node_count": len(neighborhood.nodes) if neighborhood else 0,
+            "graph_edge_count": len(neighborhood.edges) if neighborhood else 0,
+            "ask_chat_url": ask_chat_url,
+            "search_hits": search_hits,
+            "search_nlu": search_nlu,
+            "warnings": warnings,
             "error": error,
         },
         current_user=current_user,
