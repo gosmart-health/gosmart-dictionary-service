@@ -25,6 +25,7 @@ nav = [
   { "Getting Started" = [
     { "Overview" = "getting-started/index.md" },
   ] },
+  { "Architecture" = "architecture.md" },
   { "About" = [
     { "License" = "about/license.md" },
   ] },

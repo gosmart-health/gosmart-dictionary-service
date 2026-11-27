@@ -210,8 +210,11 @@ uv run ruff format .     # format
 
 ## Documentation site
 
-Docs tooling lives in the `docs` dependency group (kept out of runtime deps).
-Run from `docs/zensical/`:
+The full product documentation is published online at
+<https://gosmart.health/docs/gosmart-dictionary-service>.
+
+To build or preview it locally, the docs tooling lives in the `docs` dependency
+group (kept out of runtime deps). Run from `docs/zensical/`:
 
 ```bash
 uv run --group docs zensical serve                    # live preview
